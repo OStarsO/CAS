@@ -51,10 +51,15 @@ Chrome / Edge / Firefox / Safari 现代版本；移动端可用（Dock 横向滚
 ## 目录
 
 ```
-index.html   单文件应用（HTML + CSS + JS + 内联 SheetJS）
+index.html     页面结构与文案（47 KB）
+styles.css     全部样式（109 KB）
+app.js         全部业务逻辑（297 KB）
+xlsx.b64.js    base64 内联 SheetJS（1.17 MB，导入/导出 Excel 时才解码加载）
 README.md
 LICENSE
 ```
+
+四个文件需保持在同一目录；`index.html` 用相对路径引用另外三个，所以本地 `file://` 直接打开和静态托管都能跑。
 
 ## 许可
 
