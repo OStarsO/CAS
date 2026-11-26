@@ -393,6 +393,67 @@
     }
   };
 
+  /* ---------------- 语音播报（系统 speechSynthesis，可选） ---------------- */
+  var Speech = {
+    supported: !!(window.speechSynthesis && window.SpeechSynthesisUtterance),
+    voices: [],
+    cfg: function () {
+      return (state.settings && state.settings.speech) || { enabled: false, rate: 1, pitch: 1, voice: '' };
+    },
+    loadVoices: function () {
+      if (!this.supported) return;
+      try { this.voices = window.speechSynthesis.getVoices() || []; } catch (e) { this.voices = []; }
+      this.buildSelect();
+    },
+    buildSelect: function () {
+      var sel = $('#speechVoice'); if (!sel) return;
+      var L = lang(), cur = this.cfg().voice;
+      var html = '<option value="">' + (L === 'en' ? 'Auto (follow page language)' : '自动（跟随界面语言）') + '</option>';
+      this.voices.forEach(function (v) {
+        var name = v.name + ' · ' + (v.lang || '');
+        html += '<option value="' + esc(v.voiceURI || v.name) + '"' + (cur && cur === (v.voiceURI || v.name) ? ' selected' : '') + '>' + esc(name) + '</option>';
+      });
+      sel.innerHTML = html;
+    },
+    speak: function (text) {
+      var cfg = this.cfg();
+      if (!this.supported || !cfg.enabled || !text) return;
+      try {
+        window.speechSynthesis.cancel();
+        var u = new SpeechSynthesisUtterance(String(text).slice(0, 180));
+        u.rate = Math.max(0.6, Math.min(1.6, Number(cfg.rate) || 1));
+        u.pitch = Math.max(0.6, Math.min(1.6, Number(cfg.pitch) || 1));
+        u.lang = lang() === 'en' ? 'en-US' : 'zh-CN';
+        if (cfg.voice) {
+          var hit = this.voices.filter(function (v) { return (v.voiceURI || v.name) === cfg.voice; })[0];
+          if (hit) { u.voice = hit; u.lang = hit.lang || u.lang; }
+        }
+        window.speechSynthesis.speak(u);
+      } catch (e) { }
+    },
+    sample: function () {
+      this.speak(lang() === 'en' ? 'Speech is ready.' : '语音播报已开启。');
+    },
+    announceSingle: function (p, star) {
+      if (!p) return;
+      var L = lang();
+      this.speak(L === 'en' ? (p.name + ', ' + star + ' stars.') : ('抽中 ' + p.name + '，' + star + ' 星。'));
+    },
+    announceTen: function (items) {
+      if (!items || !items.length) return;
+      var L = lang();
+      var head = items.slice(0, 3).map(function (x) {
+        var nm = x.name || (x.p && x.p.name) || '';
+        return nm + (L === 'en' ? ' ' + x.star + '★' : ' ' + x.star + '星');
+      }).join(L === 'en' ? ', ' : '、');
+      var tail = items.length > 3 ? (L === 'en' ? ', and ' + (items.length - 3) + ' more.' : '，等 ' + (items.length - 3) + ' 人。') : (L === 'en' ? '.' : '。');
+      this.speak((L === 'en' ? 'Ten-pull finished: ' : '十连结束：') + head + tail);
+    }
+  };
+  if (Speech.supported) {
+    try { window.speechSynthesis.addEventListener('voiceschanged', function () { Speech.loadVoices(); }); } catch (e) { }
+  }
+
   /* ---------------- 状态 ---------------- */
   function defaultShortcutKeys() {
     var o = {};
@@ -406,6 +467,7 @@
       weights: { enabled: false, mult: { 5: 5, 4: 4, 3: 3, 2: 2, 1: 1 } },
       pity: { enabled: false, tenFour: true, fiftyFive: true, c5: 0, lucky: false, luckyStep: 1 },
       sound: { enabled: true, volume: 60, master: 100, bgmVolume: 0, bgmTrack: 'calm' },
+      speech: { enabled: false, rate: 1, pitch: 1, voice: '' },
       skin: 'liquid', sort: 'order', sortDir: 'asc', filter: 'all', group: 'all', search: '',
       groupColors: {},
       starFilter: 'all', countFilter: 'all', excludeFilter: 'all',
@@ -547,6 +609,15 @@
               bgmVolume: S.sound && S.sound.bgmVolume != null ? Math.max(0, Math.min(100, Number(S.sound.bgmVolume))) : 0,
               bgmTrack: ['calm', 'focus', 'epic'].indexOf(S.sound && S.sound.bgmTrack) >= 0 ? S.sound.bgmTrack : 'calm'
             },
+            speech: (function () {
+              var sp = S.speech || {};
+              return {
+                enabled: !!sp.enabled,
+                rate: Math.max(0.6, Math.min(1.6, Number(sp.rate) || 1)),
+                pitch: Math.max(0.6, Math.min(1.6, Number(sp.pitch) || 1)),
+                voice: typeof sp.voice === 'string' ? sp.voice.slice(0, 120) : ''
+              };
+            })(),
             skin: SKINS.some(function (x) { return x.id === S.skin; }) ? S.skin : 'liquid',
             sort: ['order', 'name', 'pinyin', 'id', 'drawn', 'count'].indexOf(S.sort) >= 0 ? S.sort : 'order',
             sortDir: S.sortDir === 'desc' ? 'desc' : 'asc',
@@ -640,9 +711,14 @@
   function bytesOf(s) {
     try { return new Blob([s]).size; } catch (e) { return String(s || '').length * 2; }
   }
+  /* 保存防抖：150–300ms 合并写入；flushSave() 用于关页/切库等必须立即落盘的场景 */
+  var SAVE_DELAY = 220;
+  var saveTimer = 0, savePending = false, lastSerialized = '';
+
   function stateBytes() {
-    var raw = '';
-    try { raw = localStorage.getItem(KEY) || ''; } catch (e) { }
+    // 优先复用本次写入的序列化结果，避免同一轮 save 里重复 JSON.stringify
+    var raw = lastSerialized;
+    if (!raw) { try { raw = localStorage.getItem(KEY) || ''; } catch (e) { } }
     if (!raw) { try { raw = JSON.stringify(state); } catch (e) { raw = ''; } }
     return bytesOf(raw);
   }
@@ -665,14 +741,34 @@
     }
     requestAnimationFrame(function () { bar.classList.add('on'); });
   }
+  window.addEventListener('pagehide', flushSave);
+  window.addEventListener('beforeunload', flushSave);
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') flushSave();
+  });
+
   function hideUnsavedBanner() {
     var bar = $('#unsavedBar');
     if (bar) bar.classList.remove('on');
   }
 
+  function serializeState() {
+    try { return JSON.stringify(state); } catch (e) { return ''; }
+  }
   function save() {
-    var payload;
-    try { payload = JSON.stringify(state); } catch (e) { return; }
+    savePending = true;
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(function () { saveTimer = 0; writeNow(); }, SAVE_DELAY);
+  }
+  function flushSave() {
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = 0; }
+    if (savePending) writeNow();
+  }
+  function writeNow() {
+    savePending = false;
+    var payload = serializeState();
+    if (!payload) return;
+    lastSerialized = payload;
     try {
       localStorage.setItem(KEY, payload);
       storageBroken = false;
@@ -871,6 +967,7 @@
       max: 20, ok: L === 'en' ? 'Copy' : '复制'
     });
     if (!name) return;
+    flushSave();
     if (!libStore(libs.current)) return;
     showLibLoading(L === 'en' ? 'Copying library…' : '正在复制名单库…');
     await new Promise(function (r) { setTimeout(r, 180); });
@@ -901,6 +998,7 @@
       ok: lang() === 'en' ? 'Switch' : '切换'
     });
     if (!ok) return;
+    flushSave();   // 切换前强制落盘，避免防抖窗口内丢改动
     showLibLoading(lang() === 'en' ? ('Loading ' + target.name + '…') : ('正在加载「' + target.name + '」…'));
     await new Promise(function (r) { setTimeout(r, 180); });
     if (!libStore(libs.current)) { hideLibLoading(); return; }
@@ -935,6 +1033,7 @@
       value: (lang() === 'en' ? 'Library ' : '名单库 ') + (libs.list.length + 1), max: 20
     });
     if (!name) return;
+    flushSave();
     if (!libStore(libs.current)) return;
     var id = 'lib' + Date.now().toString(36);
     libs.list.push({ id: id, name: String(name).slice(0, 20), created: Date.now() });
@@ -1125,9 +1224,30 @@
     var i = openLayers.indexOf(el);
     if (i >= 0) { openLayers.splice(i, 1); unlockScroll(); }
   }
+  /* ---------------- 模态可访问性（P0）：焦点还原 / 初始聚焦 / Tab 循环 ---------------- */
+  var modalReturnFocus = {};
+  function focusables(root) {
+    return $$('a[href],button:not([disabled]),input:not([disabled]):not([type=hidden]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])', root)
+      .filter(function (x) { return x.offsetWidth > 0 || x.offsetHeight > 0 || x.getClientRects().length; });
+  }
+  function focusFirstIn(el) {
+    if (!el) return;
+    var auto = el.querySelector('[autofocus]');
+    var target = auto ||
+      el.querySelector('.modal-body input:not([disabled]),.modal-body select:not([disabled]),.modal-body textarea:not([disabled])') ||
+      el.querySelector('.modal-foot .primary') ||
+      el.querySelector('.modal-head .close') ||
+      el.querySelector('.modal-card');
+    if (target) {
+      if (!target.hasAttribute('tabindex') && target.classList.contains('modal-card')) target.setAttribute('tabindex', '-1');
+      try { target.focus({ preventScroll: true }); } catch (e) { try { target.focus(); } catch (e2) { } }
+    }
+  }
   function openModal(el) {
     if (!el) return;
+    if (!el.classList.contains('active')) modalReturnFocus[el.id] = document.activeElement;
     el.classList.add('active');
+    el.setAttribute('aria-hidden', 'false');
     markOpen(el);
     var body = el.querySelector('.modal-body');
     if (body) body.scrollTop = 0;
@@ -1136,6 +1256,9 @@
     if (el.id === 'statsModal') renderStats();
     if (el.id === 'pointsModal') { pointSel = {}; renderPoints(); }
     if (el.id === 'importModal') { renderImportPreview(); setTimeout(function () { var t = $('#importText'); if (t) t.focus(); }, 60); }
+    setTimeout(function () {
+      if (el.classList.contains('active') && !el.contains(document.activeElement)) focusFirstIn(el);
+    }, 45);
     Sfx.play('click', 0.5);
   }
   function closeEl(el) {
@@ -1144,7 +1267,15 @@
     if (el.id === 'tenOverlay') { hideTenOverlay(); return; }
     if (el.id === 'drawOverlay') { hideDrawOverlay(); return; }
     el.classList.remove('active');
+    el.setAttribute('aria-hidden', 'true');
     markClosed(el);
+    if (el.classList.contains('modal')) {
+      var rf = modalReturnFocus[el.id];
+      delete modalReturnFocus[el.id];
+      if (rf && document.contains(rf)) {
+        try { rf.focus({ preventScroll: true }); } catch (e) { try { rf.focus(); } catch (e2) { } }
+      }
+    }
   }
   function anyLayerOpen() { return openLayers.length > 0; }
   function closeTop() {
@@ -1152,23 +1283,48 @@
     closeEl(openLayers[openLayers.length - 1]);
   }
 
+  /* Tab / Shift+Tab 在顶层模态内循环，防止焦点跑到背景 */
+  window.addEventListener('keydown', function (e) {
+    if (e.key !== 'Tab') return;
+    var top = openLayers[openLayers.length - 1];
+    if (!top || !top.classList || !top.classList.contains('modal') || !top.classList.contains('active')) return;
+    var f = focusables(top);
+    if (!f.length) return;
+    var first = f[0], last = f[f.length - 1], act = document.activeElement;
+    if (e.shiftKey) {
+      if (act === first || !top.contains(act)) { e.preventDefault(); try { last.focus(); } catch (err) { } }
+    } else if (act === last || !top.contains(act)) {
+      e.preventDefault(); try { first.focus(); } catch (err) { }
+    }
+  }, true);
+
   /* ---------------- 确认弹窗 ---------------- */
   var confirmResolve = null;
   function settleConfirm(v) {
     var m = $('#confirmModal');
     var r = confirmResolve; confirmResolve = null;
-    if (m) { m.classList.remove('active'); markClosed(m); }
+    if (m) {
+      m.classList.remove('active');
+      m.setAttribute('aria-hidden', 'true');
+      markClosed(m);
+    }
+    var rf = modalReturnFocus['confirmModal'];
+    delete modalReturnFocus['confirmModal'];
+    if (rf && document.contains(rf)) {
+      try { rf.focus({ preventScroll: true }); } catch (e) { try { rf.focus(); } catch (e2) { } }
+    }
     if (r) r(v);
   }
   function ask(opts) {
     opts = opts || {};
     return new Promise(function (resolve) {
       var m = $('#confirmModal'); if (!m) { resolve(false); return; }
-      $('#confirmTitle').textContent = opts.title || '确认';
+      var Lc = lang();
+      $('#confirmTitle').textContent = opts.title || (Lc === 'en' ? 'Confirm' : '确认');
       $('#confirmMsg').innerHTML = opts.msg || '';
       var ok = $('#confirmOk'), cancel = $('#confirmCancel');
-      ok.textContent = opts.ok || '确定';
-      cancel.textContent = opts.cancel || '取消';
+      ok.textContent = opts.ok || (Lc === 'en' ? 'OK' : '确定');
+      cancel.textContent = opts.cancel || (Lc === 'en' ? 'Cancel' : '取消');
       ok.classList.toggle('danger-fill', !!opts.danger);
       // 三选一：额外按钮（按顺序插到脚部最左侧）
       var foot = m.querySelector('.modal-foot');
@@ -1196,14 +1352,15 @@
     opts = opts || {};
     return new Promise(function (resolve) {
       var m = $('#confirmModal'); if (!m) { resolve(null); return; }
-      $('#confirmTitle').textContent = opts.title || '输入';
+      var Lt = lang();
+      $('#confirmTitle').textContent = opts.title || (Lt === 'en' ? 'Input' : '输入');
       var hint = opts.hint ? '<p style="margin-top:6px;opacity:.7;font-size:12px;line-height:1.6">' + opts.hint + '</p>' : '';
       $('#confirmMsg').innerHTML = '<p style="line-height:1.7;margin-bottom:8px">' + (opts.msg || '') + '</p>' +
         '<input id="askTextInput" class="ctl-text" style="width:100%" maxlength="' + (opts.max || 20) + '" ' +
         'value="' + esc(opts.value || '') + '" placeholder="' + esc(opts.ph || '') + '">' + hint;
       var ok = $('#confirmOk'), cancel = $('#confirmCancel');
-      ok.textContent = opts.ok || '确定';
-      cancel.textContent = opts.cancel || '取消';
+      ok.textContent = opts.ok || (Lt === 'en' ? 'OK' : '确定');
+      cancel.textContent = opts.cancel || (Lt === 'en' ? 'Cancel' : '取消');
       ok.classList.remove('danger-fill');
       var foot = m.querySelector('.modal-foot');
       if (foot) $$('.extra-btn', foot).forEach(function (b) { b.parentNode.removeChild(b); });
@@ -1236,7 +1393,7 @@
   }
 
   /* ---------------- 名单 ---------------- */
-  function starSum() { var s = 0; for (var k = 5; k >= 1; k--) s += n(state.settings.stars[k]); return s; }
+  function starSum() { return __core__.starsTotal(state.settings.stars); }
   function oddsOk() { return state.settings.weights.enabled ? true : starSum() === 100; }
   function drawnCount() { return state.participants.filter(function (p) { return p.drawn; }).length; }
   function excludedCount() { return state.participants.filter(function (p) { return p.excluded; }).length; }
@@ -1249,16 +1406,14 @@
     if (state.settings.weights.enabled) {
       for (k = 5; k >= 1; k--) w[k] = Math.max(0, Number(state.settings.weights.mult[k]) || 0);
     } else {
-      for (k = 5; k >= 1; k--) w[k] = n(state.settings.stars[k]);
+      var norm = __core__.normalizeStars(state.settings.stars);
+      for (k = 5; k >= 1; k--) w[k] = norm[k];
     }
     if (w[5] > 0) w[5] = w[5] + luckBonus();
     return w;
   }
   function weightPercent() {
-    var w = starWeights(), sum = 0, k, out = {};
-    for (k = 5; k >= 1; k--) sum += w[k];
-    for (k = 5; k >= 1; k--) out[k] = sum > 0 ? (w[k] / sum * 100) : 0;
-    return out;
+    return __core__.percentOf(starWeights());
   }
   function groups() {
     var set = {}, list = [];
@@ -1774,7 +1929,9 @@
     if (P.enabled && P.fiftyFive) {
       if (P.c5 >= 49) { P.c5 = 0; pityNotice = '50'; return 5; }
       var s = pickStar();
-      P.c5 = __core__.applyPity(P.c5, s, true).c5;
+      var pr = __core__.applyPity(P.c5, s, true);
+      P.c5 = pr.c5;
+      if (pr.forced) { pityNotice = '50'; return 5; }
       return s;
     }
     return pickStar();
@@ -1902,6 +2059,10 @@
     tenState.open = false;
     busy = false;
     markClosed(o);
+    if (!tenAnnounced && tenState.items.length && Speech) {
+      tenAnnounced = true;
+      Speech.announceTen(tenState.items);
+    }
   }
 
   function precheck() {
@@ -1968,17 +2129,25 @@
       ttlEl.classList.toggle('on', !!ttlNow);
     }
     if (hint) hint.textContent = star === 5 ? (lang() === 'en' ? '★ FIVE STAR ★' : '★ 五星出货 ★') : (lang() === 'en' ? 'Done' : '抽选完成');
-    Sfx.play(star === 5 ? 'five' : 'result', star === 5 ? 1 : 0.9);
+    // 稀有度演出：5★ 光柱/特写/压暗；4★ 紫色脉冲/轻微推镜；1–3★ 维持现状
+    var drawOv = $('#drawOverlay');
+    if (drawOv) {
+      drawOv.classList.remove('rarity-5', 'rarity-4');
+      if (star >= 4) drawOv.classList.add('rarity-' + star);
+    }
+    Sfx.play(star === 5 ? 'five' : (star === 4 ? 'success' : 'result'), star === 5 ? 1 : 0.9);
     await waitSkip(spd(skipped ? 160 : (star === 5 ? 1450 : 1150)));
     hideDrawOverlay();
 
     registerDraw([{ p: winner, star: star }], pityNotice);
     busy = false;
     flushPityNotice();
+    if (Speech && Speech.announceSingle) Speech.announceSingle(winner, star);
   }
 
   /* 十连展示：卡堆模式 —— 屏幕一次只显示一张牌；当前牌展示完成后移到堆尾，继续展示下一张未展示过的牌 */
   var tenState = { items: [], queue: [], shown: 0, open: false };
+  var tenAnnounced = false;
 
   function tenCardHtml(it, idx, cls, extraStyle) {
     var nm = it.name || (it.p && it.p.name) || '';
@@ -2183,6 +2352,7 @@
     Sfx.play('ten', 1);
     registerDraw(results, pityNotice);
     busy = false;
+    tenAnnounced = false;
     flushPityNotice();
   }
 
@@ -2629,6 +2799,16 @@
     $$('#bgmTrackSeg button').forEach(function (b) {
       b.classList.toggle('active', b.dataset.track === state.settings.sound.bgmTrack);
     });
+    // 语音播报
+    var sp = state.settings.speech || {};
+    var spe = $('#speechEnable'), spr = $('#speechRate'), spp = $('#speechPitch');
+    if (spe) spe.checked = !!sp.enabled;
+    if (spr) spr.value = Number(sp.rate) || 1;
+    if (spp) spp.value = Number(sp.pitch) || 1;
+    var spro = $('#speechRateOut'), sppo = $('#speechPitchOut');
+    if (spro) spro.textContent = (Number(sp.rate) || 1).toFixed(1);
+    if (sppo) sppo.textContent = (Number(sp.pitch) || 1).toFixed(1);
+    if (Speech.supported) Speech.loadVoices();
     // 抽取设置：人数 / 平衡 / 种子
     var pc = $('#pickCount'), pco = $('#pickCountOut'), bal = $('#balanceToggle'), sd = $('#seedInput'), ss = $('#seedStatus');
     if (pc) pc.value = state.settings.pickCount;
@@ -2912,6 +3092,7 @@
       if (v) el.title = v;
     });
     document.documentElement.lang = L === 'en' ? 'en' : 'zh-CN';
+    document.title = L === 'en' ? 'Random Roll · Liquid Glass' : '随机点名 · 液态玻璃抽卡系统';
     buildPresets();
     syncStarInputs();
     buildSkins();
@@ -4708,13 +4889,17 @@
     var searchEl = $('#searchInput');
     if (searchEl) {
       var st = null;
+      // 160ms 防抖：只重建列表，不写盘；离开输入框/回车时再持久化一次
       searchEl.addEventListener('input', function () {
         clearTimeout(st);
         st = setTimeout(function () {
           state.settings.search = searchEl.value;
-          save();
           renderRoster();
-        }, 120);
+        }, 160);
+      });
+      searchEl.addEventListener('change', function () {
+        state.settings.search = searchEl.value;
+        save();
       });
     }
     var filterEl = $('#filterSelect');
@@ -5190,6 +5375,34 @@
       Bgm.stop(true);
       Bgm.sync(); save();
       if (Bgm.enabled()) Sfx.play('coin', 0.6);
+    });
+
+    // 语音播报设置
+    var spEn = $('#speechEnable');
+    if (spEn) spEn.addEventListener('change', function () {
+      state.settings.speech.enabled = spEn.checked;
+      save();
+      if (spEn.checked) { Speech.loadVoices(); Speech.sample(); }
+    });
+    var spRate = $('#speechRate');
+    if (spRate) spRate.addEventListener('input', function () {
+      state.settings.speech.rate = Math.max(0.6, Math.min(1.6, Number(spRate.value) || 1));
+      var o = $('#speechRateOut'); if (o) o.textContent = state.settings.speech.rate.toFixed(1);
+      save();
+    });
+    if (spRate) spRate.addEventListener('change', function () { Speech.sample(); });
+    var spPitch = $('#speechPitch');
+    if (spPitch) spPitch.addEventListener('input', function () {
+      state.settings.speech.pitch = Math.max(0.6, Math.min(1.6, Number(spPitch.value) || 1));
+      var o = $('#speechPitchOut'); if (o) o.textContent = state.settings.speech.pitch.toFixed(1);
+      save();
+    });
+    if (spPitch) spPitch.addEventListener('change', function () { Speech.sample(); });
+    var spVoice = $('#speechVoice');
+    if (spVoice) spVoice.addEventListener('change', function () {
+      state.settings.speech.voice = spVoice.value || '';
+      save();
+      if (state.settings.speech.enabled) Speech.sample();
     });
 
     // 权重预设 / 概率模拟
@@ -5717,9 +5930,7 @@
       if (!last || !last.uid) { toast(lang() === 'en' ? 'Draw someone first' : '先抽一次再快捷加减分', 'err'); return; }
       if (b.dataset.quick === 'more') { openPointsFor(last.uid); return; }
       var d = Number(b.dataset.quick) || 0;
-      quickPoint(last.uid, d, d > 0
-        ? (lang() === 'en' ? 'Bonus for being drawn' : '抽中加分')
-        : (lang() === 'en' ? 'Deduct after draw' : '抽中扣分'));
+      quickPoint(last.uid, d, lang() === 'en' ? 'Class performance' : '课堂表现');
     });
 
     var ptsExport = $('#ptsExportBtn');
@@ -6082,22 +6293,11 @@
 
   /* ---------------- PWA 清单（file:// 下跳过） ---------------- */
   function initPwa() {
+    // manifest 已改为静态文件（index.html 的 <link rel="manifest">），这里只注册 Service Worker
     if (location.protocol === 'file:') return;
+    if (!('serviceWorker' in navigator)) return;
     try {
-      var manifest = {
-        name: '随机点名 · 抽卡系统', short_name: '随机点名', start_url: location.pathname,
-        display: 'standalone', background_color: '#0d1430', theme_color: '#161d3e',
-        icons: []
-      };
-      var blob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
-      var link = document.createElement('link');
-      link.rel = 'manifest';
-      link.href = URL.createObjectURL(blob);
-      document.head.appendChild(link);
-      var meta = document.createElement('meta');
-      meta.name = 'theme-color';
-      meta.content = '#161d3e';
-      document.head.appendChild(meta);
+      navigator.serviceWorker.register('sw.js').catch(function () { });
     } catch (e) { }
   }
 
@@ -6161,6 +6361,8 @@
   window.__test__ = Object.assign({}, window.__core__ || {}, {
     version: 'test-1',
     lowEnd: LOW_END,
+    flushSave: flushSave,
+    stateBytes: stateBytes,
     recountPoints: recountPoints,
     aggregate: function () { return __core__.aggregatePoints(state.pointLog || []); }
   });

@@ -31,6 +31,12 @@
     for (var k = 5; k >= 1; k--) s += st[k];
     return s;
   }
+  /* 把权重换算为 1–5★ 百分比（保留 4 位小数），空权重返回全 0 */
+  function percentOf(weights) {
+    var w = normalizeStars(weights), total = starsTotal(w), out = {};
+    for (var k = 5; k >= 1; k--) out[k] = total > 0 ? Number((w[k] / total * 100).toFixed(4)) : 0;
+    return out;
+  }
 
   /* ---------- 保底 / 幸运值 ---------- */
   /* 五星保底：c5 为当前未出 5★ 计数；返回 {c5: 新计数, forced: 是否触发 50 抽保底} */
@@ -182,6 +188,7 @@
   api.normalizeStars = normalizeStars;
   api.defaultStars = defaultStars;
   api.starsTotal = starsTotal;
+  api.percentOf = percentOf;
   api.applyPity = applyPity;
   api.luckBonus = luckBonus;
   api.hashStr = hashStr;

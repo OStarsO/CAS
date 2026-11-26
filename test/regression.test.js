@@ -33,6 +33,11 @@ eq('默认概率合计 100', T.starsTotal(d), 100);
 eq('负值钳制为 0', T.normalizeStars({ 5: -5, 4: 8, 3: 20, 2: 30, 1: 40 })[5], 0);
 eq('超过 100 钳制为 100', T.normalizeStars({ 5: 250, 4: 8, 3: 20, 2: 30, 1: 40 })[5], 100);
 eq('小数四舍五入', T.normalizeStars({ 5: 2.4, 4: 8, 3: 20, 2: 30, 1: 39.6 })[5], 2);
+const pct = T.percentOf({ 5: 5, 4: 4, 3: 3, 2: 2, 1: 1 });
+const pctSum = [5, 4, 3, 2, 1].reduce(function (a, k) { return a + pct[k]; }, 0);
+ok('权重换算百分比合计 100（±0.001）', Math.abs(pctSum - 100) < 0.001, pctSum);
+eq('权重 5★ 百分比', pct[5], 33.3333);
+eq('空权重百分比全 0', T.percentOf({}), { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 });
 
 console.log('== 保底计数 ==');
 eq('未达 49 抽、未出 5★ → 计数 +1', T.applyPity(10, 3, true).c5, 11);

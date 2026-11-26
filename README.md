@@ -11,11 +11,14 @@
 | `styles.css` | 全部样式 |
 | `app.js` | 业务逻辑 |
 | `core.js` | 纯函数集合（概率/保底/种子/积分汇总/导入解析），app 与测试共用 |
-| `xlsx.b64.js` | base64 内联 SheetJS；**按需下载**：首次导入/导出 Excel 时才拉取解码，不阻塞首屏 |
+| `xlsx.b64.js` | base64 内联 SheetJS；首次导入/导出 Excel 时才解码加载，不阻塞首屏 |
+| `manifest.webmanifest` / `icon.svg` | PWA 静态清单与图标 |
+| `sw.js` | Service Worker 离线缓存（`http(s)://` 下生效；`file://` 自动跳过） |
 | `test/regression.test.js` | Node 回归测试：`node test/regression.test.js` |
 | `回归清单.md` | 发布前端到端人工回归清单 |
 
-> ⚠️ 五个文件必须放在同一目录，双击 `index.html` 即可使用（file:// 直开，无需服务器）。
+> ⚠️ 前端文件必须放在同一目录，双击 `index.html` 即可使用（file:// 直开，无需服务器）。
+> 若用 `http(s)` 托管，首次访问后即可离线打开；`file://` 下 Service Worker 不注册，但功能完整。
 
 ## 抽卡与概率
 
@@ -50,6 +53,15 @@
 - 操作：新建（从空名单开始）、切换（自动保存当前库 + 加载提示）、重命名、复制、删除（仅剩一套时禁删，删除需二次确认）。
 - 主题、概率、音效等全局设置不随名单库切换；分组配色与保底进度跟随名单库。
 
+## 体验与无障碍
+
+- **稀有度演出**：5★ 有金色光柱、压暗背景、结果卡特写与专属音效；4★ 紫色脉冲与轻微推镜；1–3★ 保持原样。低配设备或 `prefers-reduced-motion` 时改为静态光晕。
+- **语音播报**：设置 → 声音 可开启系统语音，调节语速/音调/中英文音色；单抽揭晓与十连结束会播报姓名和星级（仅本机合成，不联网）。
+- **键盘/读屏**：所有弹窗带 `role="dialog"`、`aria-modal`、`aria-labelledby`，打开自动聚焦、关闭还原焦点，Tab/Shift+Tab 在弹窗内循环，Esc 关闭。
+- **移动端**：`viewport-fit=cover` + `env(safe-area-inset-*)` 适配刘海屏；键盘弹出时 Dock 自动隐藏。
+- **低配降级**：≤4GB 内存或 ≤4 核时自动关闭毛玻璃、星空与光晕；`prefers-reduced-motion` 下保留静态光效、移除动画。
+- **保存策略**：编辑后 220ms 防抖写入；关闭页面、切后台、切换名单库前会立即 flush，避免丢数据。
+
 ## 数据与备份
 
 - 所有数据自动写入 `localStorage`；占用超过约 80% 时会提示导出备份。
@@ -63,4 +75,5 @@ node test/regression.test.js   # 核心纯函数回归测试（概率/保底/幸
 ```
 
 浏览器控制台可用 `window.__test__` 调试核心函数（与 core.js 同一实现）。
+发布新版本时请同步修改 `sw.js` 顶部的 `CACHE` 版本号，避免客户端继续命中旧缓存。
 低配设备（≤4GB 内存或 ≤4 核）自动关闭毛玻璃、星空与光晕特效；`prefers-reduced-motion` 时动画也会精简。
