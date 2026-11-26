@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>随机点名 · 液态玻璃抽卡系统</title>
 
-<!-- 请与 app.js / styles.css / xlsx.b64.js 保持在同一目录（纯离线，无需服务器） -->
+<!-- 请与 app.js / core.js / styles.css / xlsx.b64.js 保持在同一目录（纯离线，无需服务器） -->
 <link rel="stylesheet" href="styles.css">
 </head>
 <body class="light">
@@ -510,6 +510,8 @@
                     <label class="file-label"><span data-zh="导入备份" data-en="Import backup">导入备份</span><input type="file" id="importJsonInput" accept=".json" hidden></label>
                     <button type="button" id="archiveBtn" data-zh="归档历史" data-en="Archive history">归档历史</button>
                     <button type="button" id="clearHistoryBtn2" data-zh="清空历史" data-en="Clear history">清空历史</button>
+                    <button type="button" id="errLogBtn" data-zh="导出错误日志" data-en="Export error log">导出错误日志</button>
+                    <button type="button" id="errLogClear" data-zh="清空日志" data-en="Clear log">清空日志</button>
                   </div>
                   <p class="set-desc" data-zh="名单、历史、设置、概率与保底进度都会自动写入 localStorage；容量不足时会提示导出备份。" data-en="Roster, history, settings, odds and pity progress are written to localStorage automatically; a quota warning appears when storage is full.">名单、历史、设置、概率与保底进度都会自动写入 localStorage；容量不足时会提示导出备份。</p>
                 </section>
@@ -631,6 +633,7 @@
 
 
 
+<script src="core.js"></script>
 <script src="app.js"></script>
 
 

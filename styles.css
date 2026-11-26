@@ -1923,3 +1923,18 @@ body.light .pts-stat b{color:#f2f8ff}
 .p-title-inline{font-style:normal;color:#ffe0a0;opacity:.9}
 body.light .p-title-inline{color:#ffe6a8}
 
+/* ================= 第十轮：错误日志 / 低配设备降级 ================= */
+body.low-spec *,body.low-spec *::before,body.low-spec *::after{
+  backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
+body.low-spec #starfield,
+body.low-spec .nebula,
+body.low-spec #sunlight-bg .sun-rays,
+body.low-spec #sunlight-bg .sun-chroma,
+body.low-spec #sunlight-bg .lens-flare,
+body.low-spec #cursor-glow,
+body.low-spec .stage::before,
+body.low-spec .last-card::after,
+body.low-spec .draw-btn::after,
+body.low-spec .last-card::before{display:none!important}
+body.low-spec .last-card{transition:none}
+

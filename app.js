@@ -6,6 +6,55 @@
 (function () {
   'use strict';
 
+  /* ============================================================
+     全局错误兜底（P0）：运行时异常 / 未处理 Promise rejection
+     → 友好 Toast + 最近 50 条写入 localStorage，可在设置导出
+     ============================================================ */
+  var ERRKEY = 'lottery_errlog_v1';
+  var lastErrToast = 0;
+  function pushErrLog(err) {
+    try {
+      var arr = [];
+      try { arr = JSON.parse(localStorage.getItem(ERRKEY) || '[]') || []; } catch (_) { arr = []; }
+      if (!Array.isArray(arr)) arr = [];
+      arr.push({
+        t: Date.now(),
+        msg: String((err && err.message) || err || 'unknown').slice(0, 300),
+        stack: String((err && err.stack) || '').slice(0, 1500),
+        url: String(location.href).slice(0, 200)
+      });
+      while (arr.length > 50) arr.shift();
+      localStorage.setItem(ERRKEY, JSON.stringify(arr));
+    } catch (_) { /* 日志失败时静默，避免二次报错 */ }
+  }
+  function friendlyError(err) {
+    try { pushErrLog(err); } catch (_) { }
+    var now = Date.now();
+    if (now - lastErrToast > 5000) {
+      lastErrToast = now;
+      try {
+        toast(lang() === 'en'
+          ? 'Something went wrong. It has been logged (Settings → export error log).'
+          : '发生了一个错误，已记录日志（设置 → 导出错误日志）。', 'err');
+      } catch (_) { }
+    }
+  }
+  window.addEventListener('error', function (ev) {
+    if (ev && (ev.error || ev.message)) friendlyError(ev.error || { message: ev.message });
+  });
+  window.addEventListener('unhandledrejection', function (ev) {
+    friendlyError((ev && ev.reason) || { message: 'unhandled rejection' });
+  });
+
+  /* ============================================================
+     低配设备检测（P1）：≤4GB 内存或 ≤4 核时自动精简特效
+     ============================================================ */
+  var LOW_END = false;
+  try {
+    var _mem = navigator.deviceMemory || 0, _cores = navigator.hardwareConcurrency || 0;
+    LOW_END = (_mem > 0 && _mem <= 4) || (_cores > 0 && _cores <= 4);
+  } catch (_) { LOW_END = false; }
+
   var $ = function (s, r) { return (r || document).querySelector(s); };
   var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
   var wait = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
@@ -570,14 +619,7 @@
 
   /* ---------------- 积分：以 pointLog 为准，points 为实时汇总 ---------------- */
   function recountPoints() {
-    var m = {};
-    (state.pointLog || []).forEach(function (r) {
-      if (!r || !r.uid) return;
-      var d = Number(r.delta) || 0;
-      if (!d) return;
-      m[r.uid] = (m[r.uid] || 0) + d;
-    });
-    state.points = m;
+    state.points = Object.assign({}, __core__.aggregatePoints(state.pointLog || []).net);
   }
   function pointsOf(uid) {
     return Number(state.points && state.points[uid]) || 0;
@@ -1200,8 +1242,7 @@
   function excludedCount() { return state.participants.filter(function (p) { return p.excluded; }).length; }
   function luckBonus() {
     var P = state.settings.pity;
-    if (!P.lucky || P.luckyStep <= 0) return 0;
-    return Math.min(60, P.luckyStep * Math.max(0, P.c5));
+    return __core__.luckBonus(P.c5, P.lucky, P.luckyStep);
   }
   function starWeights() {
     var w = {}, k;
@@ -1697,25 +1738,22 @@
   /* ---------------- 抽取 ---------------- */
   /* ---------------- 可复现随机（P2：种子 + 哈希校验） ---------------- */
   var seedState = 0, seedActive = false;
-  function hashStr(s) {
-    var h = 2166136261 >>> 0;
-    for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
-    return (h >>> 0).toString(16).padStart(8, '0');
-  }
-  function seedRng() {
-    /* mulberry32 */
-    seedState = (seedState + 0x6D2B79F5) >>> 0;
-    var t = seedState;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  function hashStr(s) { return __core__.hashStr(s); }
+  function seedRng() { return coreRng(); }
+  /* coreRng：由 core.js 的 createRng 生成，但与旧实现共享 seedState 变量（可复现） */
+  var coreRngFn = null;
+  function coreRng() {
+    if (!coreRngFn) coreRngFn = __core__.createRng(String(state.settings.seed || ''));
+    return coreRngFn();
   }
   function rnd() { return seedActive ? seedRng() : Math.random(); }
   function startSeed() {
     var s = String(state.settings.seed || '').trim();
     seedActive = !!s;
+    coreRngFn = null;
     if (!seedActive) return '';
     seedState = parseInt(hashStr(s), 16) >>> 0;
+    coreRngFn = __core__.createRng(s);
     return hashStr(s);
   }
 
@@ -1736,7 +1774,7 @@
     if (P.enabled && P.fiftyFive) {
       if (P.c5 >= 49) { P.c5 = 0; pityNotice = '50'; return 5; }
       var s = pickStar();
-      if (s === 5) P.c5 = 0; else P.c5 = Math.min(999, P.c5 + 1);
+      P.c5 = __core__.applyPity(P.c5, s, true).c5;
       return s;
     }
     return pickStar();
@@ -2617,6 +2655,13 @@
     buildGroupManage();
     buildAppearance();
     buildLibList();
+    try {
+      var errArr = JSON.parse(localStorage.getItem(ERRKEY) || '[]') || [];
+      var eb2 = $('#errLogBtn');
+      if (eb2) eb2.title = (lang() === 'en'
+        ? ('Recent errors: ' + (Array.isArray(errArr) ? errArr.length : 0) + ' · click to export')
+        : ('最近错误：' + (Array.isArray(errArr) ? errArr.length : 0) + ' 条 · 点击导出'));
+    } catch (_) { }
 
     // 幸运值
     var le = $('#luckyEnable'), ls = $('#luckyStep'), lso = $('#luckyStepOut'), lst = $('#luckyStatus');
@@ -2878,68 +2923,10 @@
   }
 
   /* ---------------- 导入 ---------------- */
-  function cleanCell(s) {
-    var t = String(s == null ? '' : s).trim();
-    t = t.replace(/^[\s"'“”‘’「」『』]+/, '').replace(/[\s"'“”‘’「」『』]+$/, '');
-    return t.trim();
-  }
-
-  var HEAD_WORDS = /^(姓名|名字|学生|学生姓名|学号|编号|序号|班级|分组|组别|备注|name|names|student|students|id|ids|no|no\.|number|group|class|team)$/i;
-  function isHeaderRow(parts) {
-    var filled = parts.filter(function (x) { return String(x || '').trim() !== ''; });
-    if (!filled.length) return false;
-    return filled.every(function (x) { return HEAD_WORDS.test(String(x).trim()); });
-  }
-
+  function cleanCell(s) { return __core__.cleanCell(s); }
+  function isHeaderRow(parts) { return __core__.isHeaderRow(parts); }
   function parseImport(text, existingIds, existingNames) {
-    var rows = [], dupeIds = [], dupeNames = [], bad = [], blank = 0;
-    var seen = {}, nameCount = {};
-    (existingIds || []).forEach(function (id) { if (id) seen[String(id).toLowerCase()] = 1; });
-    (existingNames || []).forEach(function (nm) {
-      var k = String(nm || '').trim();
-      if (k) nameCount[k] = (nameCount[k] || 0) + 1;
-    });
-    String(text || '')
-      .replace(/\u00a0/g, ' ')
-      .replace(/[\u200b-\u200d\ufeff]/g, '')
-      .split(/\r?\n/)
-      .forEach(function (line, li) {
-        var raw = line.trim();
-        if (!raw) { blank++; return; }
-        var s = raw.replace(/[,，;；、\t]+$/, '');
-        var parts;
-        if (/\t/.test(s)) {
-          parts = s.split('\t').map(function (x) { return x.trim(); });
-        } else {
-          parts = s.split(/[,，;；、]+/);
-          if (parts.length <= 1) {
-            var t2 = s.trim();
-            if (/\s{2,}/.test(t2)) {
-              parts = t2.split(/\s{2,}/);
-            } else {
-              var sp = t2.split(/\s+/);
-              if (sp.length >= 2 && /^\d{2,}$/.test(sp[1])) parts = [sp[0], sp[1], sp.slice(2).join(' ')];
-              else if (sp.length === 3) parts = sp;
-            }
-          }
-        }
-        if (isHeaderRow(parts)) return;
-        var name = cleanCell(parts[0] || '');
-        var id = cleanCell(parts[1] || '');
-        var group = cleanCell(parts[2] || '');
-        if (!name) { bad.push({ line: li + 1, raw: raw }); return; }
-        if (name.length > 20) name = name.slice(0, 20);
-        if (id) {
-          var key = id.toLowerCase();
-          if (seen[key]) { dupeIds.push({ line: li + 1, name: name, id: id }); return; }
-          seen[key] = 1;
-        }
-        if (nameCount[name]) dupeNames.push({ line: li + 1, name: name });
-        nameCount[name] = (nameCount[name] || 0) + 1;
-        if (group.length > 12) group = group.slice(0, 12);
-        rows.push({ name: name, id: id, group: group });
-      });
-    return { rows: rows, dupeIds: dupeIds, dupeNames: dupeNames, bad: bad, blank: blank };
+    return __core__.parseImportLines(text, existingIds, existingNames);
   }
 
   /* xlsx / xls：SheetJS 以 base64 本地内联，首次使用时解码成 Blob 脚本执行，
@@ -4995,23 +4982,15 @@
     if (updateBtn) updateBtn.addEventListener('click', async function () {
       var r = parseImport($('#importText').value, []);
       if (!r.rows.length) { toast(lang() === 'en' ? 'No valid entries' : '没有可导入的有效条目', 'err'); return; }
-      var byId = {};
-      state.participants.forEach(function (p) { if (p.id) byId[String(p.id).toLowerCase()] = p; });
+      // 规划由 core.js 纯函数完成（已被回归测试覆盖）：三种模式——已存在更新 / 新学号追加 / 空学号追加
+      var plan = __core__.planBySidUpdate(r.rows, state.participants);
       // 重名保护：同一个姓名对应不同学号时先确认，避免把两个人合成一个
-      var nameMap = {};
-      state.participants.forEach(function (p) { (nameMap[p.name] = nameMap[p.name] || []).push(p); });
-      var dupName = r.rows.filter(function (row) {
-        var list = nameMap[row.name] || [];
-        return list.some(function (x) {
-          return !row.id || String(x.id || '').toLowerCase() !== String(row.id).toLowerCase();
-        });
-      });
-      if (dupName.length) {
+      if (plan.dupNames.length) {
         var okDup = await ask({
           title: lang() === 'en' ? 'Duplicate names' : '存在重名',
           msg: (lang() === 'en'
-            ? ('<b>' + dupName.length + '</b> entries reuse a name that already belongs to someone else (different student ID). Continue anyway?')
-            : ('有 <b>' + dupName.length + '</b> 条与名单里的其他人同名但学号不同（' + esc(dupName.slice(0, 6).map(function (d) { return d.name; }).join('、')) + (dupName.length > 6 ? ' …' : '') + '）。继续按学号更新吗？')) +
+            ? ('<b>' + plan.dupNames.length + '</b> entries reuse a name that already belongs to someone else (different student ID). Continue anyway?')
+            : ('有 <b>' + plan.dupNames.length + '</b> 条与名单里的其他人同名但学号不同（' + esc(plan.dupNames.slice(0, 6).join('、')) + (plan.dupNames.length > 6 ? ' …' : '') + '）。继续按学号更新吗？')) +
             '<br><span style="opacity:.7;font-size:12px">' + (lang() === 'en'
               ? 'Empty student IDs are always appended as new entries.'
               : '学号为空的行会作为新成员追加。') + '</span>',
@@ -5019,21 +4998,22 @@
         });
         if (!okDup) return;
       }
+      var uidMap = {};
+      state.participants.forEach(function (p) { uidMap[p.uid] = p; });
       var updated = 0, added = 0;
       pushUndo();
-      r.rows.forEach(function (row) {
-        var hit = row.id ? byId[String(row.id).toLowerCase()] : null;
-        if (hit) {
-          if (row.name) hit.name = row.name;
-          if (row.group) hit.group = row.group;
-          updated++;
-        } else {
-          var order = nextOrder();
-          var p2 = { uid: nextUid(), name: row.name, id: row.id || '', group: row.group || '', drawn: false, drawnAt: 0, order: order, excluded: false, count: 0 };
-          state.participants.push(p2);
-          if (p2.id) byId[String(p2.id).toLowerCase()] = p2;
-          added++;
-        }
+      plan.updates.forEach(function (u) {
+        var p = uidMap[u.uid];
+        if (u.name) p.name = u.name;
+        if (u.group) p.group = u.group;
+        updated++;
+      });
+      plan.adds.forEach(function (row) {
+        var order = nextOrder();
+        var p2 = { uid: nextUid(), name: row.name, id: row.id || '', group: row.group || '', drawn: false, drawnAt: 0, order: order, excluded: false, count: 0 };
+        state.participants.push(p2);
+        uidMap[p2.uid] = p2;
+        added++;
       });
       save(); renderAll();
       logAction('import', '按学号更新 ' + updated + ' 人，新增 ' + added + ' 人');
@@ -5723,6 +5703,35 @@
     var ptsExport = $('#ptsExportBtn');
     if (ptsExport) ptsExport.addEventListener('click', function () { exportPoints(); });
 
+    // 错误日志（P0）
+    var errBtn = $('#errLogBtn');
+    if (errBtn) errBtn.addEventListener('click', function () {
+      var L = lang();
+      var arr = [];
+      try { arr = JSON.parse(localStorage.getItem(ERRKEY) || '[]') || []; } catch (_) { arr = []; }
+      if (!Array.isArray(arr)) arr = [];
+      if (!arr.length) { toast(L === 'en' ? 'Error log is empty 🎉' : '错误日志为空，一切正常', 'ok'); return; }
+      download('错误日志_' + stamp() + '.json', JSON.stringify({
+        exportedAt: new Date().toISOString(), count: arr.length, errors: arr
+      }, null, 2), 'application/json;charset=utf-8');
+      toast(L === 'en' ? ('Error log exported (' + arr.length + ')') : ('错误日志已导出（' + arr.length + ' 条）'), 'ok');
+    });
+    var errClr = $('#errLogClear');
+    if (errClr) errClr.addEventListener('click', async function () {
+      var L = lang();
+      var arr = [];
+      try { arr = JSON.parse(localStorage.getItem(ERRKEY) || '[]') || []; } catch (_) { arr = []; }
+      if (!Array.isArray(arr) || !arr.length) { toast(L === 'en' ? 'Error log is empty' : '错误日志为空', 'ok'); return; }
+      var ok = await ask({
+        title: L === 'en' ? 'Clear error log' : '清空错误日志',
+        msg: (L === 'en' ? 'Remove ' : '删除 ') + arr.length + (L === 'en' ? ' entries?' : ' 条日志？'),
+        ok: L === 'en' ? 'Clear' : '清空', danger: true
+      });
+      if (!ok) return;
+      try { localStorage.removeItem(ERRKEY); } catch (_) { }
+      toast(L === 'en' ? 'Error log cleared' : '错误日志已清空', 'ok');
+    });
+
     // 引导
     var gs = $('#guideStart');
     if (gs) gs.addEventListener('click', function () {
@@ -6109,9 +6118,10 @@
     if (storageBroken) showUnsavedBanner();
     if (state.history.length > HIST_SOFT) setTimeout(maybeHistoryHint, 2600);
     bind();
-    initStarfield();
-    initGlow();
-    initTilt();
+    if (LOW_END) document.body.classList.add('low-spec');
+    if (!LOW_END) initStarfield();
+    if (!LOW_END) initGlow();
+    if (!LOW_END) initTilt();
     initPwa();
 
     if (!s.guideSeen) setTimeout(function () { openModal($('#guideModal')); }, 420);
@@ -6124,6 +6134,14 @@
       }, 2200);
     }
   }
+
+  /* 回归测试钩子：与 core.js 共用实现，浏览器控制台可用 window.__test__ 调试 */
+  window.__test__ = Object.assign({}, window.__core__ || {}, {
+    version: 'test-1',
+    lowEnd: LOW_END,
+    recountPoints: recountPoints,
+    aggregate: function () { return __core__.aggregatePoints(state.pointLog || []); }
+  });
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
