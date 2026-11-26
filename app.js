@@ -2933,6 +2933,25 @@
      完全离线；解码只在第一次导入/导出 Excel 时发生一次。 */
   var sheetWB = null, sheetName = '', sheetBytes = null, sheetNames = [];
   var xlsxLoader = null;
+  var payloadLoader = null;
+  /* 按需拉取 base64 的 SheetJS 载荷：不占用首屏解析/下载，仅在真正导入导出 Excel 时加载。
+     这样即使 xlsx.b64.js 体积大或加载慢，应用本身也不会被拖住。 */
+  function loadXlsxPayload() {
+    if (window.__XLSX_B64) return Promise.resolve(window.__XLSX_B64);
+    if (payloadLoader) return payloadLoader;
+    payloadLoader = new Promise(function (resolve, reject) {
+      var sc = document.createElement('script');
+      sc.src = 'xlsx.b64.js';
+      sc.async = true;
+      sc.onload = function () {
+        if (window.__XLSX_B64) resolve(window.__XLSX_B64);
+        else { payloadLoader = null; reject(new Error('sheetjs-missing')); }
+      };
+      sc.onerror = function () { payloadLoader = null; reject(new Error('sheetjs-missing')); };
+      document.head.appendChild(sc);
+    });
+    return payloadLoader;
+  }
   function decodeB64(b64) {
     var bin = atob(b64), len = bin.length, bytes = new Uint8Array(len);
     for (var i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
@@ -2944,6 +2963,9 @@
   function loadSheetJS() {
     if (window.XLSX) return Promise.resolve(window.XLSX);
     if (xlsxLoader) return xlsxLoader;
+    if (!window.__XLSX_B64) {
+      return loadXlsxPayload().then(function () { return loadSheetJS(); });
+    }
     var p = new Promise(function (resolve, reject) {
       var b64 = window.__XLSX_B64;
       if (!b64) { reject(new Error('sheetjs-missing')); return; }

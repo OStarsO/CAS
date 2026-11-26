@@ -636,7 +636,6 @@
 <script src="core.js"></script>
 <script src="app.js"></script>
 
-
-<script src="xlsx.b64.js"></script>
+<!-- xlsx.b64.js 不再静态引入：app.js 在首次导入/导出 Excel 时动态加载，避免首屏被 1.17 MB 载荷拖慢 -->
 </body>
 </html>

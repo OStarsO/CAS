@@ -11,7 +11,7 @@
 | `styles.css` | 全部样式 |
 | `app.js` | 业务逻辑 |
 | `core.js` | 纯函数集合（概率/保底/种子/积分汇总/导入解析），app 与测试共用 |
-| `xlsx.b64.js` | base64 内联 SheetJS，首次导入/导出 Excel 时解码加载 |
+| `xlsx.b64.js` | base64 内联 SheetJS；**按需下载**：首次导入/导出 Excel 时才拉取解码，不阻塞首屏 |
 | `test/regression.test.js` | Node 回归测试：`node test/regression.test.js` |
 | `回归清单.md` | 发布前端到端人工回归清单 |
 
