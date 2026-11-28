@@ -51,6 +51,7 @@
       </div>
       <button class="icon-btn" id="soundBtn" data-zh-title="音效开关" data-en-title="Toggle sound" title="音效开关">🔊</button>
       <button class="icon-btn" id="themeToggle" data-zh-title="切换背景" data-en-title="Toggle background" title="切换背景">🌙</button>
+      <button class="icon-btn" id="exportBtn" data-zh-title="导出 / 备份 / 分享" data-en-title="Export / backup / share" title="导出 / 备份 / 分享">📤</button>
       <button class="icon-btn" id="settingsBtn" data-zh-title="设置" data-en-title="Settings" title="设置">⚙</button>
     </div>
   </header>
@@ -89,7 +90,11 @@
       <div class="stage">
         <div class="last-card" id="lastCard">
           <span class="last-label" data-zh="最 近 抽 中" data-en="LATEST DRAW">最 近 抽 中</span>
+          <span class="last-source" id="lastSource"></span>
           <div class="last-name" id="lastName">—</div>
+          <div class="last-seat" id="lastSeat"></div>
+          <div class="last-no" id="lastNo"></div>
+          <div class="last-meta" id="lastMeta"></div>
           <div class="last-id is-empty" id="lastId">等待开始</div>
           <div class="last-star" id="lastStar"></div>
           <div class="last-quick" id="lastQuick">
@@ -116,9 +121,21 @@
         <span class="sn-text"><b>常驻模式</b>：当前抽取模式与范围会一直生效，直到你在上方切换。</span>
       </div>
 
+      <div class="draw-mode">
+        <input type="range" id="drawModeRange" min="0" max="2" step="1" value="2" aria-label="抽取模式 / Draw mode">
+        <div class="draw-mode-labels">
+          <span data-mode="number" data-zh="抽序号" data-en="By number">抽序号</span>
+          <span data-mode="seat" data-zh="抽座位" data-en="By seat">抽座位</span>
+          <span data-mode="name" data-zh="抽名字" data-en="By name">抽名字</span>
+        </div>
+      </div>
       <div class="draw-actions">
         <button class="draw-btn" id="drawBtn" data-zh="单 抽" data-en="SINGLE">单 抽</button>
         <button class="draw-btn ten" id="drawTenBtn" data-zh="十 连" data-en="TEN PULL">十 连</button>
+      </div>
+      <div class="draw-extra">
+        <button type="button" class="mini-btn" id="drawIdBtn" data-zh="🎓 学号抽" data-en="🎓 Draw ID">🎓 学号抽</button>
+        <button type="button" class="mini-btn" id="openSeatBtn" data-zh="🪑 座位表" data-en="🪑 Seat map">🪑 座位表</button>
       </div>
       <div class="stage-foot" id="pityHint"></div>
     </section>
@@ -203,17 +220,9 @@
   </main>
 </div>
 
-<nav class="dock glass" id="dock">
-  <button type="button" data-action="import"><span class="ico">📥</span><span data-zh="导入" data-en="Import">导入</span></button>
-  <button type="button" data-action="history"><span class="ico">📜</span><span data-zh="历史" data-en="History">历史</span></button>
-  <button type="button" data-action="stats"><span class="ico">📊</span><span data-zh="统计" data-en="Stats">统计</span></button>
-  <button type="button" data-action="points"><span class="ico">💯</span><span data-zh="积分" data-en="Points">积分</span></button>
-  <button type="button" data-action="pk"><span class="ico">⚔️</span><span data-zh="PK" data-en="PK">PK</span></button>
-  <button type="button" data-action="export"><span class="ico">📤</span><span data-zh="导出" data-en="Export">导出</span></button>
-  <button type="button" data-action="settings"><span class="ico">⚙</span><span data-zh="设置" data-en="Settings">设置</span></button>
-  <button type="button" data-action="undo" id="undoBtn"><span class="ico">↶</span><span data-zh="撤销" data-en="Undo">撤销</span></button>
-  <button type="button" data-action="redo" id="redoBtn"><span class="ico">↷</span><span data-zh="重做" data-en="Redo">重做</span></button>
-  <button type="button" data-action="reset" class="danger"><span class="ico">♻</span><span data-zh="重置" data-en="Reset">重置</span></button>
+<nav class="dock glass" id="dock" aria-label="撤销与重做">
+  <button type="button" data-action="undo" id="undoBtn" data-zh-title="撤销（Ctrl+Z）" data-en-title="Undo (Ctrl+Z)" title="撤销（Ctrl+Z）"><span class="ico">↶</span><span data-zh="撤销" data-en="Undo">撤销</span></button>
+  <button type="button" data-action="redo" id="redoBtn" data-zh-title="重做（Ctrl+Shift+Z）" data-en-title="Redo (Ctrl+Shift+Z)" title="重做（Ctrl+Shift+Z）"><span class="ico">↷</span><span data-zh="重做" data-en="Redo">重做</span></button>
 </nav>
 
 <!-- 单抽遮罩 -->
@@ -261,6 +270,7 @@
     </div>
     <div class="modal-foot">
       <input type="file" id="fileInput" accept=".txt,.csv,.json,.xlsx,.xls,.xlsm" hidden>
+<input type="file" id="seatImportFile" accept=".xlsx,.xls" hidden>
       <button type="button" id="pickFileBtn" data-zh="选择文件…" data-en="Choose file…">选择文件…</button>
       <button type="button" id="appendBtn" data-zh="追加到名单" data-en="Append">追加到名单</button>
       <button type="button" id="updateBtn" data-zh="按学号更新" data-en="Update by ID">按学号更新</button>
@@ -294,7 +304,8 @@
     <div class="modal-body settings-body">
 
       <nav class="set-nav" id="setNav" aria-label="设置分类">
-        <button type="button" class="set-nav-btn active" data-target="g-global"><span class="sn-ico">⚙</span><span class="sn-lab" data-zh="全局" data-en="GLOBAL">全局</span></button>
+        <button type="button" class="set-nav-btn active" data-target="g-quick"><span class="sn-ico">🧭</span><span class="sn-lab" data-zh="快捷入口" data-en="SHORTCUTS">快捷入口</span></button>
+        <button type="button" class="set-nav-btn" data-target="g-global"><span class="sn-ico">⚙</span><span class="sn-lab" data-zh="全局" data-en="GLOBAL">全局</span></button>
         <button type="button" class="set-nav-btn" data-target="g-odds"><span class="sn-ico">★</span><span class="sn-lab" data-zh="星级与概率" data-en="STARS &amp; ODDS">星级与概率</span></button>
         <button type="button" class="set-nav-btn" data-target="g-look"><span class="sn-ico">🎨</span><span class="sn-lab" data-zh="外观" data-en="APPEARANCE">外观</span></button>
         <button type="button" class="set-nav-btn" data-target="g-sound"><span class="sn-ico">🔊</span><span class="sn-lab" data-zh="声音" data-en="SOUND">声音</span></button>
@@ -302,7 +313,66 @@
         <button type="button" class="set-nav-btn" data-target="g-interact"><span class="sn-ico">⌨</span><span class="sn-lab" data-zh="交互" data-en="INTERACTION">交互</span></button>
         <button type="button" class="set-nav-btn" data-target="g-other"><span class="sn-ico">🏅</span><span class="sn-lab" data-zh="其他" data-en="OTHERS">其他</span></button>
         <button type="button" class="set-nav-btn" data-target="g-data"><span class="sn-ico">💾</span><span class="sn-lab" data-zh="语言与数据" data-en="LANGUAGE &amp; DATA">语言与数据</span></button>
+        <button type="button" class="set-nav-btn" data-target="g-about"><span class="sn-ico">📖</span><span class="sn-lab" data-zh="关于" data-en="ABOUT">关于</span></button>
       </nav>
+
+      <section class="set-group" id="g-quick">
+        <div class="set-group-head">
+          <h3><span class="sg-ico">🧭</span><span data-zh="快捷入口" data-en="SHORTCUTS">快捷入口</span></h3>
+          <span class="sg-count">7</span>
+          <p data-zh="导入、历史、统计、积分、座位表与 PK 都在这里打开；底部工具条只保留撤销与重做。" data-en="Import, history, stats, points, seat map and PK all open from here; the bottom bar keeps only undo and redo.">导入、历史、统计、积分、座位表与 PK 都在这里打开；底部工具条只保留撤销与重做。</p>
+        </div>
+        <div class="set-group-body">
+          <section class="set-sec">
+                  <h4 data-zh="功能面板" data-en="PANELS">功能面板</h4>
+                  <div class="quick-grid" id="quickGrid">
+                    <button type="button" class="quick-item" data-action="import">
+                      <span class="qi-ico">📥</span>
+                      <b data-zh="导入 / 编辑名单" data-en="Import / edit roster">导入 / 编辑名单</b>
+                      <span class="qi-sub" data-zh="粘贴、CSV、Excel，支持追加与按学号更新" data-en="Paste, CSV or Excel — append or update by student ID">粘贴、CSV、Excel，支持追加与按学号更新</span>
+                    </button>
+                    <button type="button" class="quick-item" data-action="history">
+                      <span class="qi-ico">📜</span>
+                      <b data-zh="抽取历史" data-en="Draw history">抽取历史</b>
+                      <span class="qi-sub" data-zh="按时间倒序，可放回、补积分、看种子" data-en="Newest first — return to pool, add points, inspect seed">按时间倒序，可放回、补积分、看种子</span>
+                    </button>
+                    <button type="button" class="quick-item" data-action="stats">
+                      <span class="qi-ico">📊</span>
+                      <b data-zh="统计 / 成就 / 排行" data-en="Stats / achievements">统计 / 成就 / 排行</b>
+                      <span class="qi-sub" data-zh="星级分布、趋势图、分组占比与排行榜" data-en="Star spread, trends, group share and ranking">星级分布、趋势图、分组占比与排行榜</span>
+                    </button>
+                    <button type="button" class="quick-item" data-action="points">
+                      <span class="qi-ico">💯</span>
+                      <b data-zh="课堂积分" data-en="Class points">课堂积分</b>
+                      <span class="qi-sub" data-zh="单人/批量加减分，流水可筛选可导出" data-en="Single or batch points, filterable log with export">单人/批量加减分，流水可筛选可导出</span>
+                    </button>
+                    <button type="button" class="quick-item" data-action="seats">
+                      <span class="qi-ico">🪑</span>
+                      <b data-zh="座位表" data-en="Seat map">座位表</b>
+                      <span class="qi-sub" data-zh="动态行列、拖拽排座、座位 Excel 导入导出" data-en="Dynamic grid, drag to arrange, seat Excel in/out">动态行列、拖拽排座、座位 Excel 导入导出</span>
+                    </button>
+                    <button type="button" class="quick-item" data-action="pk">
+                      <span class="qi-ico">⚔️</span>
+                      <b data-zh="PK 对决" data-en="PK duel">PK 对决</b>
+                      <span class="qi-sub" data-zh="两人或两组同台比拼，胜负入历史" data-en="Two students or groups head to head, logged">两人或两组同台比拼，胜负入历史</span>
+                    </button>
+                    <button type="button" class="quick-item" data-action="export">
+                      <span class="qi-ico">📤</span>
+                      <b data-zh="导出 / 备份" data-en="Export / backup">导出 / 备份</b>
+                      <span class="qi-sub" data-zh="Excel、积分报表、长图、打印与 JSON 备份" data-en="Excel, points report, long card, print and JSON backup">Excel、积分报表、长图、打印与 JSON 备份</span>
+                    </button>
+                  </div>
+                </section>
+          <section class="set-sec set-sec-danger">
+                  <h4 data-zh="危险操作" data-en="DANGER ZONE">危险操作</h4>
+                  <p class="set-desc" data-zh="重置会清空全部名单、抽取历史、积分记录与座位安排，并回到首次使用的状态；设置、概率、保底与音效偏好保留。执行前会二次确认，执行后仍可撤销一步。" data-en="Reset clears the whole roster, draw history, point records and seat assignments and returns to a first-run state; settings, odds, pity and sound preferences are kept. It asks for confirmation and can be undone one step.">重置会清空全部名单、抽取历史、积分记录与座位安排，并回到首次使用的状态；设置、概率、保底与音效偏好保留。执行前会二次确认，执行后仍可撤销一步。</p>
+                  <button type="button" id="resetBtn2" class="btn-danger">
+                    <span class="bd-ico">♻</span>
+                    <span data-zh="重置全部数据" data-en="Reset all data">重置全部数据</span>
+                  </button>
+                </section>
+        </div>
+      </section>
 
       <section class="set-group" id="g-global">
         <div class="set-group-head">
@@ -526,6 +596,47 @@
         </div>
       </section>
 
+      <section class="set-group" id="g-about">
+        <div class="set-group-head">
+          <h3><span class="sg-ico">📖</span><span data-zh="关于" data-en="ABOUT">关于</span></h3>
+          <span class="sg-count">3</span>
+          <p data-zh="项目仓库、作者主页与版本信息" data-en="Repository, author links and version">项目仓库、作者主页与版本信息</p>
+        </div>
+        <div class="set-group-body">
+          <section class="set-sec">
+                  <h4 data-zh="项目与作者" data-en="PROJECT &amp; AUTHOR">项目与作者</h4>
+                  <div class="about-links">
+                    <a class="about-link" href="https://github.com/OStarsO/CAS" target="_blank" rel="noopener noreferrer">
+                      <span class="al-ico">🐙</span>
+                      <span class="al-txt">
+                        <b data-zh="项目仓库" data-en="Repository">项目仓库</b>
+                        <span class="al-url">github.com/OStarsO/CAS</span>
+                      </span>
+                      <span class="al-go">↗</span>
+                    </a>
+                    <a class="about-link" href="https://ostarso.github.io" target="_blank" rel="noopener noreferrer">
+                      <span class="al-ico">✍️</span>
+                      <span class="al-txt">
+                        <b data-zh="作者博客" data-en="Author blog">作者博客</b>
+                        <span class="al-url">ostarso.github.io</span>
+                      </span>
+                      <span class="al-go">↗</span>
+                    </a>
+                    <a class="about-link is-todo" id="aboutProfile" role="link" tabindex="0" aria-disabled="true" data-todo="1">
+                      <span class="al-ico">👤</span>
+                      <span class="al-txt">
+                        <b data-zh="作者 GitHub 主页" data-en="Author on GitHub">作者 GitHub 主页</b>
+                        <span class="al-url" id="aboutProfileUrl" data-zh="占位链接 · 待补充" data-en="Placeholder · to be filled">占位链接 · 待补充</span>
+                      </span>
+                      <span class="al-go">↗</span>
+                    </a>
+                  </div>
+                  <p class="set-desc" data-zh="随机点名 · 液态玻璃抽卡系统：纯离线单页应用，双击 index.html 即可运行，名单、历史、积分与座位只保存在本机浏览器（localStorage），不会上传。遇到问题可在仓库提 Issue。" data-en="Random Roll · Liquid Glass Lottery: a fully offline single-page app — double-click index.html to run. Roster, history, points and seats live only in your browser (localStorage) and are never uploaded. File issues in the repository.">随机点名 · 液态玻璃抽卡系统：纯离线单页应用，双击 index.html 即可运行，名单、历史、积分与座位只保存在本机浏览器（localStorage），不会上传。遇到问题可在仓库提 Issue。</p>
+                  <p class="set-desc about-meta"><span data-zh="数据版本 v" data-en="Data schema v">数据版本 v</span><b id="aboutVersion">4</b><span data-zh=" · 单文件离线 · 无需联网" data-en=" · offline · no network needed"> · 单文件离线 · 无需联网</span></p>
+                </section>
+        </div>
+      </section>
+
     </div>
     <div class="modal-foot">
       <button type="button" class="primary" data-close data-zh="完成" data-en="Done">完成</button>
@@ -558,6 +669,22 @@
     <div class="modal-foot">
       <button type="button" id="ptsExportBtn" title="最近 10 抽 + 积分变动 + 当前积分" data-zh="导出积分报表" data-en="Export points report">导出积分报表</button>
       <button type="button" class="primary" data-close data-zh="关闭" data-en="Close">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 座位表弹窗 -->
+<div class="modal" id="seatModal" role="dialog" aria-modal="true" aria-labelledby="seatTitle" aria-hidden="true">
+  <div class="modal-card glass wide seat-card">
+    <div class="modal-head">
+      <h3 id="seatTitle" data-zh="座位表" data-en="Seat map">座位表</h3>
+      <button class="close" data-close>✕</button>
+    </div>
+    <div class="modal-body seat-body" id="seatBody"></div>
+    <div class="modal-foot">
+      <button type="button" id="seatDrawBtn" class="primary" data-zh="抽座位" data-en="Draw a seat">抽座位</button>
+      <button type="button" id="seatExportBtn" data-zh="导出座位 Excel" data-en="Export seat Excel">导出座位 Excel</button>
+      <button type="button" data-close data-zh="关闭" data-en="Close">关闭</button>
     </div>
   </div>
 </div>

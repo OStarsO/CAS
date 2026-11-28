@@ -7,6 +7,16 @@
   'use strict';
 
   /* ============================================================
+     关于信息（设置 → 关于）
+     profile 留空时显示占位链接；填上作者 GitHub 主页地址后自动生效
+     ============================================================ */
+  var ABOUT = {
+    repo: 'https://github.com/OStarsO/CAS',
+    blog: 'https://ostarso.github.io',
+    profile: 'https://github.com/OStarsO'
+  };
+
+  /* ============================================================
      全局错误兜底（P0）：运行时异常 / 未处理 Promise rejection
      → 友好 Toast + 最近 50 条写入 localStorage，可在设置导出
      ============================================================ */
@@ -434,10 +444,26 @@
     sample: function () {
       this.speak(lang() === 'en' ? 'Speech is ready.' : '语音播报已开启。');
     },
-    announceSingle: function (p, star) {
+    announceSingle: function (p, star, src, seat, no) {
       if (!p) return;
       var L = lang();
-      this.speak(L === 'en' ? (p.name + ', ' + star + ' stars.') : ('抽中 ' + p.name + '，' + star + ' 星。'));
+      var text;
+      if (src === 'number') {
+        text = L === 'en'
+          ? ('Number ' + (no || '') + ', ' + p.name + '.')
+          : ('序号 ' + (no || '') + '，' + p.name + '。');
+      } else if (src === 'id') {
+        text = L === 'en'
+          ? ('Student ID ' + (p.id || '') + ', ' + p.name + '.')
+          : ('学号 ' + (p.id || '') + '，' + p.name + '。');
+      } else if (src === 'seat') {
+        text = L === 'en'
+          ? ('Seat ' + seatLabel(seat) + ', ' + p.name + '.')
+          : ('座位 ' + seatLabel(seat) + '，' + p.name + '。');
+      } else {
+        text = L === 'en' ? (p.name + ', ' + star + ' stars.') : ('抽中 ' + p.name + '，' + star + ' 星。');
+      }
+      this.speak(text);
     },
     announceTen: function (items) {
       if (!items || !items.length) return;
@@ -472,6 +498,7 @@
       groupColors: {},
       starFilter: 'all', countFilter: 'all', excludeFilter: 'all',
       pointScope: 'recent10', pointSort: 'points', pointLogUid: 'all', pointLogRange: 'all',
+      seatFlat: null, drawMode: 'name',
       accent: '', bg: 'auto', bgImage: '',
       animSpeed: '1', title: 'auto',
       seed: '', pickCount: 10, balance: false, longPressMs: 480,
@@ -480,7 +507,7 @@
     };
   }
   function freshState() {
-    return { version: 4, seq: 1, participants: [], history: [], drawIndex: 0, last: null, achv: {}, logs: [], archive: null, pointLog: [], points: {}, pointSeq: 1, settings: defaultSettings() };
+    return { version: 4, seq: 1, participants: [], history: [], drawIndex: 0, last: null, achv: {}, logs: [], archive: null, pointLog: [], points: {}, pointSeq: 1, seatmap: freshSeatmap(), settings: defaultSettings() };
   }
   var state = freshState();
   var storageBroken = false;
@@ -490,6 +517,143 @@
   var storageWarned = false, histHinted = false;
   var UKEY = 'lottery_undo_v4';
   var LOG_CAP = 200, HIST_SOFT = 1000, UNDO_PERSIST = 10, POINT_LOG_CAP = 2000;
+  /* ---------------- 座位表 v3（只存 uid；行/列/座位号动态） ---------------- */
+  function freshSeatmap() {
+    return { v: 3, rows: 1, cols: 1, grid: [null], numbers: {}, auto: true, n: 0 };
+  }
+  function nearSquare(n) {
+    n = Math.max(0, Math.round(Number(n) || 0));
+    if (n <= 1) return { rows: 1, cols: 1 };
+    var cols = Math.ceil(Math.sqrt(n));
+    var rows = Math.ceil(n / cols);
+    return { rows: rows, cols: cols };
+  }
+  function normalizeSeatmap(raw, parts) {
+    var sm = (raw && typeof raw === 'object') ? raw : {};
+    var grid = Array.isArray(sm.grid) ? sm.grid.slice() : (Array.isArray(sm.seats) ? sm.seats.slice() : []);
+    grid = grid.map(function (u) { return (u && typeof u === 'object') ? u.uid : u; });
+    return {
+      v: 3,
+      rows: Math.max(1, Math.min(999, Math.min(parts ? parts.length || 1 : 999, Math.round(Number(sm.rows) || 0)))),
+      cols: Math.max(1, Math.min(999, Math.min(parts ? parts.length || 1 : 999, Math.round(Number(sm.cols) || 0)))),
+      grid: grid,
+      numbers: (sm.numbers && typeof sm.numbers === 'object') ? sm.numbers : {},
+      auto: sm.auto !== false,
+      n: Math.max(0, Math.round(Number(sm.n) || 0))
+    };
+  }
+  function seatOrder(byUid, oldGrid) {
+    var pos = {};
+    (oldGrid || []).forEach(function (u, i) { if (u && pos[u] == null) pos[u] = i; });
+    return state.participants.slice().sort(function (a, b) {
+      var na = Number(state.seatmap.numbers[a.uid]) || 0;
+      var nb = Number(state.seatmap.numbers[b.uid]) || 0;
+      if (na && nb && na !== nb) return na - nb;
+      if (na && !nb) return -1;
+      if (!na && nb) return 1;
+      var pa = pos[a.uid] == null ? 1e9 : pos[a.uid];
+      var pb = pos[b.uid] == null ? 1e9 : pos[b.uid];
+      return pa - pb || a.order - b.order;
+    });
+  }
+  /* 让网格始终恰好容纳 N 人；默认近方阵；手动布局保留已有位置、把新增的人补进空格 */
+  function syncSeatmap(opts) {
+    opts = opts || {};
+    if (!state.seatmap || typeof state.seatmap !== 'object') state.seatmap = freshSeatmap();
+    var sm = state.seatmap, N = state.participants.length;
+    var valid = {}, byUid = {};
+    state.participants.forEach(function (p) { valid[p.uid] = 1; byUid[p.uid] = p; });
+    var rows = Math.max(1, Math.min(Math.max(1, N), Math.round(Number(sm.rows) || 0)));
+    var cols = Math.max(1, Math.min(Math.max(1, N), Math.round(Number(sm.cols) || 0)));
+    var auto = sm.auto !== false;
+    var oldGrid = (Array.isArray(sm.grid) ? sm.grid : []).map(function (u) {
+      return u ? String(u) : null;
+    });
+    var seen = {}, cleaned = [];
+    oldGrid.forEach(function (u) {
+      if (u && valid[u] && !seen[u]) { seen[u] = 1; cleaned.push(u); }
+      else cleaned.push(null);
+    });
+    if (!N) { rows = 1; cols = 1; cleaned = []; }
+    else if (!sm.rows || !sm.cols || (auto && (sm.n !== N || opts.force))) {
+      var d = nearSquare(N);
+      rows = d.rows; cols = d.cols;
+      auto = true;
+    }
+    // 容量必须 ≥ 人数；按行优先扩大
+    while (rows * cols < N) {
+      if (cols <= rows) cols++; else rows++;
+      if (rows > N) { rows = N; cols = Math.ceil(N / rows); break; }
+    }
+    // 自动模式：按座位号/旧位置排序后重新排成近方阵
+    if (auto && (sm.n !== N || opts.force || !oldGrid.length)) {
+      var ordered = seatOrder(byUid, oldGrid);
+      cleaned = new Array(rows * cols).fill(null);
+      ordered.forEach(function (p, i) { if (i < cleaned.length) cleaned[i] = p.uid; });
+    }
+    var grid = new Array(rows * cols).fill(null);
+    for (var i = 0; i < Math.min(cleaned.length, grid.length); i++) grid[i] = cleaned[i];
+    // 补入未入座的人（手动布局新增成员）
+    var seated = {};
+    grid.forEach(function (u) { if (u) seated[u] = 1; });
+    var unseated = state.participants.filter(function (p) { return !seated[p.uid]; });
+    var addCell = function () {
+      var nulls = [];
+      grid.forEach(function (u, idx) { if (!u) nulls.push(idx); });
+      while (unseated.length > nulls.length) {
+        var newCols = cols + 1;
+        var expanded = new Array(rows * newCols).fill(null);
+        for (var r = 0; r < rows; r++) {
+          for (var c = 0; c < cols; c++) expanded[r * newCols + c] = grid[r * cols + c];
+        }
+        cols = newCols; grid = expanded;
+        nulls = [];
+        grid.forEach(function (u, idx) { if (!u) nulls.push(idx); });
+      }
+      return nulls;
+    };
+    if (unseated.length) {
+      var nulls = addCell();
+      unseated.forEach(function (p) { var idx = nulls.shift(); if (idx != null) grid[idx] = p.uid; });
+    }
+    // 座位号：唯一且 ≥1 即保留。删除同学后不重排、不清号（"已选号人员保持不变"）；
+    // 只有在一个人都没有编号时，才按座位顺序自动编号。
+    var numbers = {}, usedNo = {};
+    state.participants.forEach(function (p) {
+      var no = Math.round(Number(sm.numbers && sm.numbers[p.uid]));
+      if (no >= 1 && no <= 9999 && !usedNo[no]) { numbers[p.uid] = no; usedNo[no] = 1; }
+    });
+    if (N > 0 && !Object.keys(numbers).length && opts.autoNumber !== false) {
+      var no = 1;
+      grid.forEach(function (uid) { if (uid && !numbers[uid]) numbers[uid] = no++; });
+    }
+    sm.v = 3; sm.rows = rows; sm.cols = cols; sm.grid = grid;
+    sm.numbers = numbers; sm.auto = auto; sm.n = N;
+  }
+  function seatLabel(i) {
+    var n = Number(i);
+    var sm = state.seatmap || {};
+    var cols = Math.max(1, Number(sm.cols) || 1);
+    var cap = (Number(sm.rows) || 1) * cols;
+    if (!(n >= 0 && n < cap)) return '';
+    return (Math.floor(n / cols) + 1) + (lang() === 'en' ? '-' : '排') + (n % cols + 1) + (lang() === 'en' ? '' : '座');
+  }
+  function seatIndexOfUid(uid) {
+    return state.seatmap && Array.isArray(state.seatmap.grid) ? state.seatmap.grid.indexOf(uid) : -1;
+  }
+  function seatNoOf(uid) {
+    var n = Number(state.seatmap && state.seatmap.numbers && state.seatmap.numbers[uid]);
+    return n >= 1 ? n : 0;
+  }
+  function unseatUids(set) {
+    if (!state.seatmap || !Array.isArray(state.seatmap.grid)) return 0;
+    var n = 0;
+    state.seatmap.grid = state.seatmap.grid.map(function (uid) {
+      if (uid && set[uid]) { n++; return null; }
+      return uid;
+    });
+    return n;
+  }
 
   function numStars(o) {
     var out = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 };
@@ -526,6 +690,8 @@
               };
             });
           }
+          state.seatmap = normalizeSeatmap(p.seatmap, state.participants);
+          syncSeatmap();
           if (Array.isArray(p.history)) {
             state.history = p.history.filter(function (h) { return h && h.name; }).map(function (h) {
               return {
@@ -535,7 +701,11 @@
                 time: h.time || '', batchId: h.batchId || ('legacy' + (h.ts || 0)), mode: h.mode || 'unique',
                 seedHash: h.seedHash ? String(h.seedHash) : '',
                 seedText: h.seedText ? String(h.seedText).slice(0, 40) : '',
-                pity: h.pity ? String(h.pity) : ''
+                pity: h.pity ? String(h.pity) : '',
+                source: h.source ? String(h.source) : 'roster',
+                seat: (h.seat == null || isNaN(Number(h.seat)) ? null : Number(h.seat)),
+                no: Number(h.no) || 0,
+                seatLabel: h.seatLabel ? String(h.seatLabel) : ''
               };
             });
           }
@@ -634,6 +804,8 @@
             pointSort: ['points', 'plus', 'minus', 'recent'].indexOf(S.pointSort) >= 0 ? S.pointSort : 'points',
             pointLogUid: typeof S.pointLogUid === 'string' ? S.pointLogUid : 'all',
             pointLogRange: ['all', 'today', '7', '30'].indexOf(S.pointLogRange) >= 0 ? S.pointLogRange : 'all',
+            seatFlat: (S.seatFlat === true || S.seatFlat === false) ? S.seatFlat : null,
+            drawMode: ['number', 'seat', 'name'].indexOf(S.drawMode) >= 0 ? S.drawMode : 'name',
             accent: typeof S.accent === 'string' && /^#[0-9a-fA-F]{6}$/.test(S.accent) ? S.accent : '',
             bg: ['auto', 'aurora', 'sunset', 'forest', 'mono'].indexOf(S.bg) >= 0 ? S.bg : 'auto',
             bgImage: typeof S.bgImage === 'string' && S.bgImage.slice(0, 11) === 'data:image/' ? S.bgImage : '',
@@ -667,6 +839,8 @@
     }
     // 抽中次数以历史为准重建，避免旧数据缺字段
     recount();
+    // 座位表迁移/自动编号后落盘一次（防抖），确保 state.seatmap 持久化
+    save();
     // 兼容旧版本主题 / 动画键
     try {
       var la = localStorage.getItem('lottery_anim_v2');
@@ -898,7 +1072,7 @@
     return JSON.stringify({
       version: state.version, seq: state.seq, participants: state.participants, history: state.history,
       drawIndex: state.drawIndex, last: state.last, achv: state.achv, logs: (state.logs || []).slice(-60),
-      archive: state.archive, pointLog: state.pointLog, pointSeq: state.pointSeq,
+      archive: state.archive, pointLog: state.pointLog, pointSeq: state.pointSeq, seatmap: state.seatmap,
       settings: { groupColors: state.settings.groupColors, pity: state.settings.pity }
     });
   }
@@ -1053,7 +1227,8 @@
     try { localStorage.removeItem(libKey(id)); } catch (e) { }
     selected = {}; editingUid = null; vsStep = 0;
     save();
-    applyLang(); renderAll(); renderSettings(); buildLibList();
+    applyLang();
+    syncDrawModeUI(); renderAll(); renderSettings(); buildLibList();
     toast(lang() === 'en' ? ('Created ' + name) : ('已新建名单库「' + name + '」'), 'ok');
   }
   async function renameLib(id) {
@@ -1113,7 +1288,7 @@
       participants: state.participants, history: state.history, seq: state.seq,
       drawIndex: state.drawIndex, last: state.last,
       settings: state.settings, achv: state.achv, logs: state.logs.slice(-60), archive: state.archive,
-      pointLog: state.pointLog, pointSeq: state.pointSeq
+      pointLog: state.pointLog, pointSeq: state.pointSeq, seatmap: state.seatmap
     });
   }
   function applySnap(json) {
@@ -1137,6 +1312,8 @@
     state.archive = o.archive || null;
     state.pointLog = Array.isArray(o.pointLog) ? o.pointLog : [];
     state.pointSeq = Number(o.pointSeq) || (state.pointLog.length + 1);
+    state.seatmap = normalizeSeatmap(o.seatmap, state.participants);
+    syncSeatmap();
     recountPoints();
     if (Array.isArray(o.logs)) state.logs = o.logs;
   }
@@ -1204,6 +1381,9 @@
     var u = $('#undoBtn'), r = $('#redoBtn');
     if (u) { u.disabled = !undoStack.length; u.style.opacity = undoStack.length ? '' : '.4'; }
     if (r) { r.disabled = !redoStack.length; r.style.opacity = redoStack.length ? '' : '.4'; }
+    // 两颗都不可用时整条 dock 进入 idle：视觉淡出且不拦截点击（避免小屏幕上挡住舞台按钮）
+    var dock = $('#dock');
+    if (dock) dock.classList.toggle('idle', !undoStack.length && !redoStack.length);
   }
 
   /* ---------------- 滚动锁定 + 弹窗 ---------------- */
@@ -1233,11 +1413,10 @@
   function focusFirstIn(el) {
     if (!el) return;
     var auto = el.querySelector('[autofocus]');
-    var target = auto ||
-      el.querySelector('.modal-body input:not([disabled]),.modal-body select:not([disabled]),.modal-body textarea:not([disabled])') ||
-      el.querySelector('.modal-foot .primary') ||
-      el.querySelector('.modal-head .close') ||
-      el.querySelector('.modal-card');
+    /* 默认聚焦弹窗容器：不受子元素 visibility 过渡影响，读屏器会播报 aria-labelledby；
+       需要输入的场景（导入、确认框、命名框）随后会自行把焦点移到输入框/主按钮。 */
+    var target = auto || el.querySelector('.modal-card');
+    if (target && !target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
     if (target) {
       if (!target.hasAttribute('tabindex') && target.classList.contains('modal-card')) target.setAttribute('tabindex', '-1');
       try { target.focus({ preventScroll: true }); } catch (e) { try { target.focus(); } catch (e2) { } }
@@ -1255,7 +1434,13 @@
     if (el.id === 'historyModal') renderHistory();
     if (el.id === 'statsModal') renderStats();
     if (el.id === 'pointsModal') { pointSel = {}; renderPoints(); }
-    if (el.id === 'importModal') { renderImportPreview(); setTimeout(function () { var t = $('#importText'); if (t) t.focus(); }, 60); }
+    if (el.id === 'seatModal') { seatEdit = false; seatSel = null; renderSeatMap(); }
+    if (el.id === 'importModal') {
+      renderImportPreview();
+      var focusImport = function () { var t = $('#importText'); if (t && el.classList.contains('active')) { try { t.focus(); } catch (e) { } } };
+      setTimeout(focusImport, 60);
+      setTimeout(focusImport, 360);
+    }
     setTimeout(function () {
       if (el.classList.contains('active') && !el.contains(document.activeElement)) focusFirstIn(el);
     }, 45);
@@ -1344,6 +1529,7 @@
       confirmResolve = resolve;
       openModal(m);
       setTimeout(function () { try { ok.focus(); } catch (e) { } }, 50);
+      setTimeout(function () { if (m.classList.contains('active')) { try { ok.focus(); } catch (e) { } } }, 360);
     });
   }
 
@@ -1369,6 +1555,12 @@
         resolve(v === true && input ? input.value.trim() : null);
       };
       openModal(m);
+      var focusAsk = function () {
+        var input = $('#askTextInput');
+        if (!input || !m.classList.contains('active')) return;
+        input.focus(); try { input.select(); } catch (e) { }
+      };
+      setTimeout(focusAsk, 360);
       setTimeout(function () {
         var input = $('#askTextInput');
         if (!input) return;
@@ -1465,6 +1657,27 @@
       arr = arr.filter(function (p) { return g === '__none' ? !p.group : p.group === g; });
     }
     return arr;
+  }
+
+  /* 三个独立候选池：名单抽 pool()；学号抽 poolIds()；座位抽 poolSeats() */
+  function poolIds() {
+    return state.participants.filter(function (p) { return p.id && !p.excluded; });
+  }
+  function poolSeats() {
+    var by = participantsByUid(), out = [];
+    (state.seatmap && Array.isArray(state.seatmap.grid) ? state.seatmap.grid : []).forEach(function (uid, i) {
+      var p = uid ? by[uid] : null;
+      if (p) out.push({ p: p, seat: i, no: Number(state.seatmap.numbers[uid]) || 0 });
+    });
+    return out;
+  }
+  function poolNumbers() {
+    var out = [];
+    state.participants.forEach(function (p) {
+      var no = seatNoOf(p.uid);
+      if (no >= 1) out.push({ p: p, no: no, seat: seatIndexOfUid(p.uid) });
+    });
+    return out;
   }
 
   var selected = {};
@@ -1793,6 +2006,16 @@
     renderStageNote();
   }
 
+  var DRAW_MODES = ['number', 'seat', 'name'];
+  function syncDrawModeUI() {
+    var v = Math.max(0, DRAW_MODES.indexOf(state.settings.drawMode || 'name'));
+    var range = $('#drawModeRange');
+    if (range && Number(range.value) !== v) range.value = v;
+    $$('.draw-mode-labels span').forEach(function (el) {
+      el.classList.toggle('active', el.dataset.mode === DRAW_MODES[v]);
+    });
+  }
+
   /* 舞台常驻说明：把当前生效的模式 / 范围 / 批量 / 种子 / 保底写清楚 */
   function renderStageNote() {
     var el = $('#stageNote'); if (!el) return;
@@ -1808,9 +2031,11 @@
     if (S.balance) extra.push(L === 'en' ? 'group-balanced' : '分组等比例');
     if (S.seed) extra.push((L === 'en' ? 'seed #' : '种子 #') + hashStr(String(S.seed)));
     if (S.pity.enabled) extra.push(L === 'en' ? 'pity on' : '保底开启');
+    var drawModeTxt = S.drawMode === 'number' ? (L === 'en' ? 'draw: number' : '抽：序号')
+      : (S.drawMode === 'seat' ? (L === 'en' ? 'draw: seat' : '抽：座位') : (L === 'en' ? 'draw: name' : '抽：名字'));
     el.innerHTML = '<span class="sn-ico">🧷</span><span class="sn-text">' +
       '<span class="sn-tag">' + (L === 'en' ? 'PERSISTENT' : '常驻') + '</span>' +
-      '<b>' + modeTxt + '</b> · ' + (L === 'en' ? 'scope: ' : '范围：') + esc(scopeTxt) +
+      '<b>' + modeTxt + '</b> · ' + drawModeTxt + ' · ' + (L === 'en' ? 'scope: ' : '范围：') + esc(scopeTxt) +
       (extra.length ? ' · ' + extra.join(' · ') : '') +
       '<br>' + (L === 'en'
         ? 'These settings stay in effect until you switch them above.'
@@ -1818,23 +2043,62 @@
   }
 
   function renderLastCard() {
+    var L = lang();
     var card = $('#lastCard'), nm = $('#lastName'), idEl = $('#lastId'), st = $('#lastStar');
+    var srcEl = $('#lastSource'), seatEl = $('#lastSeat'), noEl = $('#lastNo'), metaEl = $('#lastMeta');
     if (!card) return;
     var last = state.last;
+    card.classList.remove('is-id', 'is-seat', 'is-number');
     if (!last) {
       card.classList.remove('has-data');
       if (nm) nm.textContent = '—';
-      if (idEl) { idEl.textContent = lang() === 'en' ? 'Waiting' : '等待开始'; idEl.classList.add('is-empty'); }
+      if (idEl) { idEl.textContent = L === 'en' ? 'Waiting' : '等待开始'; idEl.classList.add('is-empty'); }
       if (st) { st.textContent = ''; st.style.color = ''; }
+      if (srcEl) { srcEl.textContent = ''; srcEl.style.display = 'none'; }
+      if (seatEl) { seatEl.textContent = ''; seatEl.style.display = 'none'; }
+      if (noEl) { noEl.textContent = ''; noEl.style.display = 'none'; }
+      if (metaEl) { metaEl.textContent = ''; metaEl.style.display = 'none'; }
       card.style.removeProperty('--last-color');
       card.style.removeProperty('--last-glow');
       return;
     }
     card.classList.add('has-data');
-    if (nm) nm.textContent = last.name;
+    var src = last.source || 'roster';
+    var curP = participantsByUid()[last.uid];
+    var curSeat = seatIndexOfUid(last.uid);
+    var curNo = seatNoOf(last.uid);
+    if (src === 'id') card.classList.add('is-id');
+    if (src === 'seat') card.classList.add('is-seat');
+    if (src === 'number') card.classList.add('is-number');
+    if (nm) nm.textContent = curP ? curP.name : last.name;
+    if (srcEl) {
+      srcEl.textContent = src === 'id' ? (L === 'en' ? 'ID DRAW' : '学号抽')
+        : (src === 'seat' ? (L === 'en' ? 'SEAT' : '座位抽')
+          : (src === 'number' ? (L === 'en' ? 'NUMBER' : '序号抽') : ''));
+      srcEl.style.display = src === 'roster' ? 'none' : 'inline-flex';
+    }
+    if (seatEl) {
+      if (src === 'seat' && curSeat >= 0) {
+        seatEl.textContent = seatLabel(curSeat);
+        seatEl.style.display = 'block';
+      } else { seatEl.textContent = ''; seatEl.style.display = 'none'; }
+    }
+    if (noEl) {
+      if (src === 'number') {
+        noEl.textContent = curNo ? ('#' + curNo) : '';
+        noEl.style.display = curNo ? 'block' : 'none';
+      } else { noEl.textContent = ''; noEl.style.display = 'none'; }
+    }
     if (idEl) {
-      idEl.textContent = last.id || (lang() === 'en' ? 'NO ID' : '无学号');
-      idEl.classList.toggle('is-empty', !last.id);
+      idEl.textContent = (curP ? curP.id : last.id) || (L === 'en' ? 'NO ID' : '无学号');
+      idEl.classList.toggle('is-empty', !(curP ? curP.id : last.id));
+    }
+    if (metaEl) {
+      var bits = [];
+      bits.push(curNo ? ('#' + curNo) : (L === 'en' ? 'Unnumbered' : '未编号'));
+      bits.push(curSeat >= 0 ? seatLabel(curSeat) : (L === 'en' ? 'No seat' : '未入座'));
+      metaEl.textContent = bits.join(' · ');
+      metaEl.style.display = 'block';
     }
     if (st) {
       st.textContent = stars(last.star);
@@ -1881,6 +2145,15 @@
     renderStage();
     renderRoster();
     renderGroups();
+    var osb = $('#openSeatBtn');
+    if (osb) {
+      var stSeat = seatStats();
+      osb.title = lang() === 'en'
+        ? ('Seated ' + stSeat.seated + ' / ' + stSeat.total + ' · ' + stSeat.unseated + ' unseated')
+        : ('已入座 ' + stSeat.seated + ' / 共 ' + stSeat.total + '，' + stSeat.unseated + ' 人未入座不参与座位抽');
+    }
+    syncDrawModeUI();
+    if ($('#seatModal') && $('#seatModal').classList.contains('active')) renderSeatMap();
   }
 
   function syncAdvFilters() {
@@ -2079,38 +2352,66 @@
     return true;
   }
 
-  async function drawSingle() {
+  async function drawSingle(source) {
     if (busy) return;
+    var mode = source || state.settings.drawMode || 'name';
+    if (mode === 'roster') mode = 'name';
+    var src = mode === 'seat' ? 'seat' : (mode === 'number' ? 'number' : (mode === 'id' ? 'id' : 'roster'));
     if (!precheck()) return;
-    var cand = pool();
+    var cand;
+    if (src === 'number') cand = poolNumbers();
+    else if (src === 'seat') cand = poolSeats();
+    else if (src === 'id') cand = poolIds();
+    else cand = pool();
     if (!cand.length) {
-      toast(state.settings.mode === 'unique'
+      if (src === 'id') toast(lang() === 'en' ? 'No participants with a student ID' : '没有带学号的学生可抽', 'err');
+      else if (src === 'number') toast(lang() === 'en' ? 'No numbered seats yet — use “Auto number” in the seat editor' : '还没有座位号，请先在座位编辑模式点「按拼音自动编号」', 'err');
+      else if (src === 'seat') toast(lang() === 'en' ? 'No seats yet — add participants or open the seat map' : '还没有座位，请先打开座位表', 'err');
+      else toast(state.settings.mode === 'unique'
         ? (lang() === 'en' ? 'Pool is empty — return participants or switch to repeatable' : '候选池已抽完，可在名单中「放回」，或切换到可重复模式')
         : (lang() === 'en' ? 'No one in the selected group' : '当前分组没有可抽取的人'), 'err');
       return;
     }
+    var entries = cand.map(function (x) { return x && x.p ? x : { p: x }; });
     Sfx.ensure();
     busy = true;
     pushUndo();
     startSeed();
     var star = rollStar();
-    var winner = cand[Math.floor(rnd() * cand.length)];
+    var pick = entries[Math.floor(rnd() * entries.length)];
+    var winner = pick.p || pick;
+    var seatIdx = pick.seat != null ? pick.seat : seatIndexOfUid(winner.uid);
+    var seatNo = Number(pick.no) || seatNoOf(winner.uid);
 
     var card = $('#rollCard'), nm = $('#rollName'), idEl = $('#rollId'), stEl = $('#rollStar'), hint = $('#drawHint');
     var ttlEl = $('#rollTitle');
     showDrawOverlay();
+    var ov = $('#drawOverlay');
+    if (ov) {
+      ov.classList.remove('source-id', 'source-seat', 'source-number');
+      if (src !== 'roster') ov.classList.add('source-' + src);
+    }
     if (card) { card.classList.remove('winner'); card.classList.add('rolling'); }
     if (stEl) stEl.textContent = '';
     if (ttlEl) { ttlEl.textContent = ''; ttlEl.classList.remove('on'); }
-    if (hint) hint.textContent = lang() === 'en' ? 'Drawing…' : '正在抽选…';
+    if (hint) hint.textContent = src === 'id'
+      ? (lang() === 'en' ? 'Drawing a student ID…' : '正在抽取学号…')
+      : (src === 'number'
+        ? (lang() === 'en' ? 'Drawing a seat number…' : '正在抽取序号…')
+        : (src === 'seat' ? (lang() === 'en' ? 'Drawing a seat…' : '正在抽取座位…') : (lang() === 'en' ? 'Drawing…' : '正在抽选…')));
     startTicks(78);
 
     var i = 0;
     var cyc = setInterval(function () {
-      var p = cand[(i++) % cand.length];
+      var ent = entries[(i++) % entries.length];
+      var p = ent.p;
       if (!nm) return;
       nm.textContent = p.name;
-      if (idEl) { idEl.textContent = p.id || '—'; idEl.classList.toggle('is-empty', !p.id); }
+      if (idEl) {
+        var tmp = src === 'id' ? (p.id || '—') : (src === 'number' ? ('#' + (ent.no || '—')) : '—');
+        idEl.textContent = tmp;
+        idEl.classList.toggle('is-empty', !tmp || tmp === '—');
+      }
       nm.classList.remove('anim'); void nm.offsetWidth; nm.classList.add('anim');
     }, 72);
 
@@ -2118,7 +2419,13 @@
     clearInterval(cyc); stopTicks();
     if (card) { card.classList.remove('rolling'); card.classList.add('winner'); }
     if (nm) nm.textContent = winner.name;
-    if (idEl) { idEl.textContent = winner.id || '—'; idEl.classList.toggle('is-empty', !winner.id); }
+    if (idEl) {
+      if (src === 'id') idEl.textContent = winner.id || '—';
+      else if (src === 'number') idEl.textContent = '#' + (seatNo || '—');
+      else if (src === 'seat') idEl.textContent = seatLabel(seatIdx);
+      else idEl.textContent = winner.id || '—';
+      idEl.classList.toggle('is-empty', src === 'id' ? !winner.id : (src === 'number' ? !seatNo : (src === 'seat' ? false : !winner.id)));
+    }
     if (stEl) {
       stEl.style.setProperty('--star-color', STAR_COLORS[star]);
       stEl.textContent = stars(star);
@@ -2128,7 +2435,13 @@
       ttlEl.textContent = ttlNow ? (ttlNow.ico + ' ' + (lang() === 'en' ? ttlNow.en : ttlNow.zh)) : '';
       ttlEl.classList.toggle('on', !!ttlNow);
     }
-    if (hint) hint.textContent = star === 5 ? (lang() === 'en' ? '★ FIVE STAR ★' : '★ 五星出货 ★') : (lang() === 'en' ? 'Done' : '抽选完成');
+    if (hint) hint.textContent = src === 'id'
+      ? (lang() === 'en' ? 'Student ID drawn' : '学号抽取完成')
+      : (src === 'number'
+        ? (lang() === 'en' ? 'Seat number drawn' : '序号抽取完成')
+        : (src === 'seat'
+          ? (lang() === 'en' ? 'Seat drawn' : '座位抽取完成')
+          : (star === 5 ? (lang() === 'en' ? '★ FIVE STAR ★' : '★ 五星出货 ★') : (lang() === 'en' ? 'Done' : '抽选完成'))));
     // 稀有度演出：5★ 光柱/特写/压暗；4★ 紫色脉冲/轻微推镜；1–3★ 维持现状
     var drawOv = $('#drawOverlay');
     if (drawOv) {
@@ -2139,10 +2452,10 @@
     await waitSkip(spd(skipped ? 160 : (star === 5 ? 1450 : 1150)));
     hideDrawOverlay();
 
-    registerDraw([{ p: winner, star: star }], pityNotice);
+    registerDraw([{ p: winner, star: star, source: src, seat: seatIdx, no: seatNo }], pityNotice);
     busy = false;
     flushPityNotice();
-    if (Speech && Speech.announceSingle) Speech.announceSingle(winner, star);
+    if (Speech && Speech.announceSingle) Speech.announceSingle(winner, star, src, seatIdx, seatNo);
   }
 
   /* 十连展示：卡堆模式 —— 屏幕一次只显示一张牌；当前牌展示完成后移到堆尾，继续展示下一张未展示过的牌 */
@@ -2152,6 +2465,8 @@
   function tenCardHtml(it, idx, cls, extraStyle) {
     var nm = it.name || (it.p && it.p.name) || '';
     var nid = it.id || (it.p && it.p.id) || '';
+    var sub = it.source === 'seat' && it.seat != null ? seatLabel(it.seat)
+      : (it.source === 'number' && it.no ? '#' + it.no : (nid || (lang() === 'en' ? 'NO ID' : '无学号')));
     var sc = STAR_COLORS[it.star] || '#9aa5c4';
     var sg = STAR_GLOW[it.star] || 'rgba(154,165,196,.3)';
     var st = '--sc:' + sc + ';--sg:' + sg + (extraStyle ? ';' + extraStyle : '');
@@ -2162,8 +2477,7 @@
       '<div class="ten-stars">' + stars(it.star) + '</div>' +
       '<div class="ten-name">' + esc(nm) + '</div>' +
       '<span class="tc-line" aria-hidden="true"></span>' +
-      '<div class="ten-id' + (nid ? '' : ' is-empty') + '">' +
-      esc(nid || (lang() === 'en' ? 'NO ID' : '无学号')) + '</div>' +
+      '<div class="ten-id' + (nid ? '' : ' is-empty') + '">' + esc(sub) + '</div>' +
       '</div>';
   }
 
@@ -2316,9 +2630,16 @@
   async function drawTen() {
     if (busy) return;
     if (!precheck()) return;
-    var cand = pool();
+    var mode = state.settings.drawMode || 'name';
+    var src = mode === 'seat' ? 'seat' : (mode === 'number' ? 'number' : 'roster');
+    var cand;
+    if (src === 'seat') cand = poolSeats();
+    else if (src === 'number') cand = poolNumbers();
+    else cand = pool().map(function (p) { return { p: p, star: 0 }; });
     if (!cand.length) {
-      toast(state.settings.mode === 'unique'
+      if (src === 'seat') toast(lang() === 'en' ? 'No seats yet' : '还没有座位', 'err');
+      else if (src === 'number') toast(lang() === 'en' ? 'No numbered seats yet — use Auto number' : '还没有座位号，请先在座位编辑模式自动编号', 'err');
+      else toast(state.settings.mode === 'unique'
         ? (lang() === 'en' ? 'Pool is empty — return participants or switch to repeatable' : '候选池已抽完，可在名单中「放回」，或切换到可重复模式')
         : (lang() === 'en' ? 'No one in the selected group' : '当前分组没有可抽取的人'), 'err');
       return;
@@ -2329,11 +2650,18 @@
     startSeed();
     var want = Math.max(1, Math.min(50, Number(state.settings.pickCount) || 10));
     var count = Math.min(want, cand.length);
-    if (state.settings.mode === 'unique' && cand.length < want) {
+    if (src === 'roster' && state.settings.mode === 'unique' && cand.length < want) {
       toast(lang() === 'en' ? ('Only ' + cand.length + ' left — drawing ' + count) : ('候选池只剩 ' + cand.length + ' 人，本次抽取 ' + count + ' 人'), 'ok');
     }
-    var picks = state.settings.balance ? pickBalanced(cand.slice(), count) : shuffle(cand.slice()).slice(0, count);
-    var results = picks.map(function (p) { return { p: p, star: rollStar() }; });
+    var picks;
+    if (src === 'roster') {
+      var people = cand.map(function (x) { return x.p; });
+      picks = state.settings.balance ? pickBalanced(people.slice(), count) : shuffle(people.slice()).slice(0, count);
+      picks = picks.map(function (p) { return { p: p, source: 'roster' }; });
+    } else {
+      picks = shuffle(cand.slice()).slice(0, count);
+    }
+    var results = picks.map(function (x) { return { p: x.p, star: rollStar(), source: src, seat: x.seat, no: x.no }; });
 
     var P = state.settings.pity;
     if (P.enabled && P.tenFour) {
@@ -2365,18 +2693,29 @@
     var seedRaw = state.settings.seed ? String(state.settings.seed).slice(0, 40) : '';
     items.forEach(function (it) {
       var p = it.p;
+      var src = it.source || 'roster';
       state.drawIndex = (state.drawIndex || 0) + 1;
       p.count = (Number(p.count) || 0) + 1;
-      if (mode === 'unique') { p.drawn = true; p.drawnAt = now.getTime(); }
+      // 只有名单抽会改变「已抽中」标记；学号抽/座位抽为独立候选池，不影响名单池
+      if (mode === 'unique' && src === 'roster') { p.drawn = true; p.drawnAt = now.getTime(); }
       state.history.push({
         index: state.drawIndex, uid: p.uid, name: p.name, id: p.id || '', group: p.group || '',
         star: it.star, ts: now.getTime(), time: hhmmss(now), batchId: batchId, mode: mode,
+        source: src, seat: (it.seat == null ? null : it.seat),
+        no: (it.no ? Number(it.no) : seatNoOf(p.uid)) || 0,
+        seatLabel: (it.seat == null ? '' : seatLabel(it.seat)),
         seedHash: seedTag, seedText: seedRaw, pity: it.pity || pityTag || ''
       });
     });
     var best = items[0];
     items.forEach(function (it) { if (it.star > best.star) best = it; });
-    state.last = { name: best.p.name, id: best.p.id || '', star: best.star, uid: best.p.uid, group: best.p.group || '', ts: now.getTime(), seedHash: seedTag };
+    state.last = {
+      name: best.p.name, id: best.p.id || '', star: best.star, uid: best.p.uid, group: best.p.group || '',
+      ts: now.getTime(), seedHash: seedTag,
+      source: best.source || 'roster', seat: (best.seat == null ? null : best.seat),
+      no: (best.no ? Number(best.no) : seatNoOf(best.p.uid)) || 0,
+      seatLabel: (best.seat == null ? '' : seatLabel(best.seat))
+    };
     logAction('draw', ((items.length > 1 ? '批量(' + items.length + ')：' : '单抽：')) + items.map(function (it) { return it.p.name + ' ' + stars(it.star); }).join(' / '));
     save();
     renderAll();
@@ -2541,7 +2880,10 @@
           '<span class="hist-no">' + h.index + '</span>' +
           '<div class="hist-main"><b>' + esc(h.name) + '</b>' +
           '<span class="' + (h.id ? '' : 'is-empty') + '">' + (h.id ? esc(h.id) : (lang() === 'en' ? 'NO ID' : '无学号')) + '</span>' +
-          (h.pity ? '<span class="hist-pity">' + (lang() === 'en' ? 'PITY' : '保底') + '</span>' : '') + '</div>' +
+          (h.pity ? '<span class="hist-pity">' + (lang() === 'en' ? 'PITY' : '保底') + '</span>' : '') +
+          (h.source === 'id' ? '<span class="hist-src">' + (lang() === 'en' ? 'ID' : '学号') + '</span>' :
+            (h.source === 'number' ? '<span class="hist-src">' + (h.no ? '#' + h.no : (lang() === 'en' ? 'NO.' : '序号')) + '</span>' :
+            (h.source === 'seat' ? '<span class="hist-src">' + (h.seatLabel || (h.seat != null ? esc(seatLabel(h.seat)) : (lang() === 'en' ? 'SEAT' : '座位'))) + '</span>' : ''))) + '</div>' +
           '<span class="hist-stars" style="color:' + (STAR_COLORS[h.star] || '') + '">' + stars(h.star) + '</span>' +
           '<span class="hist-time">' + esc(h.time || '') + '</span>' +
           '</div>';
@@ -3258,6 +3600,7 @@
         drawn: false, drawnAt: 0, order: order++, excluded: false, count: 0
       });
     });
+    syncSeatmap();
   }
 
   function readFileText(file) {
@@ -3728,6 +4071,377 @@
     } catch (e) {
       exportPointsJson(d);
     }
+  }
+
+  /* ---------------- 座位表：渲染 / 编辑 / 拖拽 ---------------- */
+  var seatEdit = false, seatSel = null;
+  function isSeatFlat() {
+    var v = state.settings.seatFlat;
+    return (v === true || v === false) ? v : LOW_END;
+  }
+  function seatShort(i) {
+    var C = Math.max(1, Number(state.seatmap.cols) || 1);
+    return (Math.floor(i / C) + 1) + '-' + (i % C + 1);
+  }
+  function seatStats() {
+    var by = participantsByUid(), seated = 0, numbered = 0;
+    var grid = (state.seatmap && state.seatmap.grid) || [];
+    grid.forEach(function (uid) { if (uid && by[uid]) seated++; });
+    state.participants.forEach(function (p) { if (seatNoOf(p.uid) >= 1) numbered++; });
+    var total = state.participants.length;
+    var cap = Math.max(1, (Number(state.seatmap.rows) || 1) * (Number(state.seatmap.cols) || 1));
+    return {
+      seated: seated, total: total, unseated: Math.max(0, total - seated),
+      numbered: numbered, unnumbered: Math.max(0, total - numbered),
+      rows: Number(state.seatmap.rows) || 1, cols: Number(state.seatmap.cols) || 1,
+      cap: cap, gaps: Math.max(0, cap - seated)
+    };
+  }
+  function renderSeatMap() {
+    var body = $('#seatBody'); if (!body) return;
+    syncSeatmap();
+    var L = lang(), by = participantsByUid(), st = seatStats();
+    var flat = isSeatFlat() || st.rows > 8 || st.cols > 12;
+    var sm = state.seatmap, grid = sm.grid || [];
+    var lastUid = state.last && state.last.uid ? state.last.uid : '';
+    var hitIdx = lastUid ? seatIndexOfUid(lastUid) : -1;
+    var slotsHtml = '';
+    for (var cell = 0; cell < st.cap; cell++) {
+      var r = Math.floor(cell / st.cols) + 1, c = cell % st.cols + 1;
+      var uid = grid[cell], p = uid ? by[uid] : null;
+      var isHit = p && cell === hitIdx;
+      var sel = seatEdit && seatSel === cell;
+      var no = p ? seatNoOf(p.uid) : 0;
+      var seatCls = 'seat' + (p ? ' occupied' : ' empty') + (sel ? ' sel' : '') + (isHit ? ' hit' : '');
+      var aria = seatLabel(cell) + (p ? (L === 'en' ? ', ' : '，') + p.name + (no ? (L === 'en' ? ', number ' + no : '，序号 ' + no) : (L === 'en' ? ', unnumbered' : '，未编号')) : (L === 'en' ? ', empty slot' : '，空格（非座位）'));
+      slotsHtml += '<div class="seat-slot' + (p ? ' occupied' : ' empty') + '" data-cell="' + cell + '" style="grid-row:' + r + ';grid-column:' + c + '"' +
+        (p ? '' : ' data-empty="1"') + '>' +
+        (p ? '<div class="' + seatCls + '" data-seat="' + cell + '" data-uid="' + uid + '" role="' + (seatEdit ? 'button' : 'group') + '" tabindex="' + (seatEdit ? '0' : '-1') + '"' +
+          ' aria-label="' + esc(aria) + '" title="' + esc(aria) + '"' + (seatEdit ? ' draggable="true"' : '') + '>' +
+          '<span class="seat-no">' + (no ? '#' + no : (L === 'en' ? '—' : '未编号')) + '</span>' +
+          '<span class="seat-name">' + esc(p.name) + '</span>' +
+          '<span class="seat-pos">' + seatShort(cell) + '</span>' +
+          '</div>' : '') +
+        '</div>';
+    }
+    var editRules = L === 'en'
+      ? 'Seat count always equals roster size. The grid may contain empty slots (not seats, not drawn). Default is a near-square layout; drag seats to the left/right or any empty slot, swap seats, or make an independent row/column. Numbers stay with the student unless you renumber.'
+      : '座位数始终等于名单人数；网格中的空格不是座位、不参与抽取。默认近方阵；可把末排座位拖到左侧/右侧或任意空格，也可互换或独立成列/成行；拖动只改位置，不改序号。';
+    var layoutBar = seatEdit
+      ? '<div class="seat-layout-bar">' +
+          '<label>' + (L === 'en' ? 'Rows' : '行') + ' <input type="number" id="seatRowsInput" min="1" max="' + Math.max(1, st.total) + '" value="' + st.rows + '"></label>' +
+          '<label>' + (L === 'en' ? 'Cols' : '列') + ' <input type="number" id="seatColsInput" min="1" max="' + Math.max(1, st.total) + '" value="' + st.cols + '"></label>' +
+          '<button type="button" class="mini-btn" id="seatApplyLayout">' + (L === 'en' ? 'Apply' : '应用布局') + '</button>' +
+          '<button type="button" class="mini-btn" id="seatAutoLayout">' + (L === 'en' ? 'Near-square' : '自动方阵') + '</button>' +
+          '<button type="button" class="mini-btn" id="seatAutoNumber">' + (L === 'en' ? 'Number unnumbered' : '按拼音自动编号') + (st.unnumbered ? ' (' + st.unnumbered + ')' : '') + '</button>' +
+          '<button type="button" class="mini-btn" id="seatImportBtn">' + (L === 'en' ? 'Import Excel' : '导入 Excel') + '</button>' +
+        '</div>' +
+        '<p class="seat-rules">' + esc(editRules) + '</p>'
+      : '';
+    body.innerHTML =
+      '<div class="seat-top">' +
+        '<div class="seat-stats"><b>' + (L === 'en' ? 'Seated ' + st.seated : '已入座 ' + st.seated) + '</b> / ' +
+          (L === 'en' ? ('total ' + st.total + '，' + st.unseated + ' unseated — not included in seat draw')
+                      : ('共 ' + st.total + '，' + st.unseated + ' 人未入座不参与座位抽')) +
+          ' · <span class="' + (st.unnumbered ? 'seat-warn' : '') + '">' + (L === 'en' ? ('numbered ' + st.numbered + '/' + st.total) : ('已编号 ' + st.numbered + '/' + st.total)) + '</span>' +
+        '</div>' +
+        '<div class="seat-tools">' +
+          '<div class="seg seat-mode-seg" id="seatModeSeg">' +
+            '<button type="button" data-seatmode="draw"' + (!seatEdit ? ' class="active"' : '') + '>' + (L === 'en' ? 'Draw mode' : '抽奖模式') + '</button>' +
+            '<button type="button" data-seatmode="edit"' + (seatEdit ? ' class="active"' : '') + '>' + (L === 'en' ? 'Edit mode' : '编辑模式') + '</button>' +
+          '</div>' +
+          '<button type="button" class="mini-btn" id="seatFlatBtn"' + ((st.rows > 8 || st.cols > 12) ? ' disabled title="' + (L === 'en' ? 'Too many rows/columns — 2D is used' : '行/列过多，自动使用 2D') + '"' : '') + '>' + (flat ? (L === 'en' ? '3D view' : '3D 视图') : (L === 'en' ? '2D view' : '2D 视图')) + '</button>' +
+        '</div>' +
+      '</div>' +
+      layoutBar +
+      '<div class="seat-stage' + (flat ? ' flat' : '') + '" id="seatStage">' +
+        '<div class="seat-floor" id="seatFloor" style="grid-template-columns:repeat(' + st.cols + ',minmax(0,1fr));min-width:' + (st.cols * 62) + 'px;--seat-cols:' + st.cols + ';--seat-rows:' + st.rows + '">' + slotsHtml + '</div>' +
+        '<div class="seat-podium">' + (L === 'en' ? 'PODIUM' : '讲 台') + '</div>' +
+      '</div>' +
+      '<div class="seat-hint">' + (L === 'en'
+        ? ('Grid ' + st.rows + '×' + st.cols + ' · ' + st.seated + ' seats · ' + st.gaps + ' empty slots (not seats)')
+        : ('网格 ' + st.rows + '×' + st.cols + ' · ' + st.seated + ' 个座位 · ' + st.gaps + ' 个空格（不是座位，不参与抽取）')) +
+        (seatEdit ? (L === 'en' ? ' · Drag a seat onto another seat to swap, or onto an empty slot to move.' : ' · 拖到另一个座位互换，拖到空格移动。') : '') +
+      '</div>';
+    var sd = $('#seatDrawBtn');
+    if (sd) {
+      sd.style.display = seatEdit ? 'none' : '';
+      sd.disabled = seatEdit || !st.seated;
+      sd.textContent = L === 'en' ? 'Draw a seat' : '抽座位';
+      sd.title = seatEdit ? (L === 'en' ? 'Switch to draw mode first' : '请先切回抽奖模式')
+        : (!st.seated ? (L === 'en' ? 'No seats yet' : '还没有座位') : '');
+    }
+  }
+
+  function moveSeatTo(uid, cell) {
+    if (!uid || !(cell >= 0 && cell < seatStats().cap)) return;
+    var grid = state.seatmap.grid;
+    var old = grid.indexOf(uid);
+    if (old === cell) { seatSel = null; renderSeatMap(); return; }
+    var p = participantsByUid()[uid];
+    if (!p) return;
+    pushUndo();
+    state.seatmap.auto = false;
+    var prev = grid[cell] || null;
+    if (old >= 0) grid[old] = prev;
+    grid[cell] = uid;
+    seatSel = null;
+    save(); renderSeatMap(); renderLastCard();
+    Sfx.play('click', 0.5);
+    toast(p.name + ' → ' + seatLabel(cell), 'ok');
+  }
+
+  function autoNumberSeats() {
+    var L = lang();
+    var un = state.participants.filter(function (p) { return seatNoOf(p.uid) < 1; });
+    if (!un.length) { toast(L === 'en' ? 'Everyone already has a number' : '所有学生都已有序号', 'ok'); return; }
+    var used = {}, free = [], maxUsed = 0;
+    state.participants.forEach(function (p) { var n = seatNoOf(p.uid); if (n) { used[n] = 1; if (n > maxUsed) maxUsed = n; } });
+    // 只填空号：优先补 1..N 中的空位；若号段已被占满则顺延，绝不覆盖已有编号
+    var top = Math.max(state.participants.length, maxUsed) + un.length + 1;
+    for (var n = 1; n <= top && free.length < un.length; n++) if (!used[n]) free.push(n);
+    if (!free.length) { toast(L === 'en' ? 'No free numbers' : '没有可用序号', 'err'); return; }
+    un.sort(function (a, b) {
+      var pa = pyOf(a.name), pb = pyOf(b.name);
+      return pa === pb ? a.name.localeCompare(b.name, 'zh-Hans-CN') || a.order - b.order : (pa < pb ? -1 : 1);
+    });
+    pushUndo();
+    un.forEach(function (p, i) { if (free[i] != null) state.seatmap.numbers[p.uid] = free[i]; });
+    save(); renderSeatMap(); renderLastCard();
+    toast(L === 'en' ? ('Numbered ' + un.length + ' unnumbered students by pinyin') : ('已按姓名首字母为 ' + un.length + ' 人编号，原有编号保持不变'), 'ok');
+  }
+
+  function applySeatLayout(rows, cols) {
+    var L = lang();
+    var N = state.participants.length;
+    rows = Math.round(Number(rows)); cols = Math.round(Number(cols));
+    if (!(rows >= 1 && cols >= 1) || rows > Math.max(1, N) || cols > Math.max(1, N)) {
+      toast(L === 'en' ? ('Rows/columns must be 1–' + Math.max(1, N)) : ('行/列必须在 1–' + Math.max(1, N) + ' 之间'), 'err');
+      return;
+    }
+    if (rows * cols < N) {
+      toast(L === 'en' ? ('Grid too small: ' + rows + '×' + cols + ' < ' + N + ' seats') : ('网格太小：' + rows + '×' + cols + ' 容不下 ' + N + ' 个座位'), 'err');
+      return;
+    }
+    pushUndo();
+    var sm = state.seatmap;
+    var ordered = seatOrder(participantsByUid(), sm.grid);
+    sm.auto = false;
+    sm.rows = rows; sm.cols = cols;
+    sm.grid = new Array(rows * cols).fill(null);
+    ordered.forEach(function (p, i) { if (i < sm.grid.length) sm.grid[i] = p.uid; });
+    syncSeatmap();
+    save(); renderSeatMap(); renderLastCard();
+    toast(L === 'en' ? ('Layout ' + rows + '×' + cols) : ('布局已设为 ' + rows + '×' + cols), 'ok');
+  }
+
+  function autoLayoutSeats() {
+    pushUndo();
+    state.seatmap.auto = true;
+    syncSeatmap({ force: true });
+    save(); renderSeatMap(); renderLastCard();
+    toast(lang() === 'en' ? 'Near-square layout restored' : '已恢复近方阵布局', 'ok');
+  }
+
+  function seatClick(cell) {
+    if (!seatEdit) return;
+    var grid = state.seatmap.grid;
+    if (seatSel === cell) { seatSel = null; renderSeatMap(); return; }
+    if (seatSel != null && grid[seatSel]) { moveSeatTo(grid[seatSel], cell); return; }
+    if (grid[cell]) { seatSel = cell; renderSeatMap(); }
+    else toast(lang() === 'en' ? 'Pick a seat first, then an empty slot' : '请先点一个有人的座位，再点空格移动', 'err');
+  }
+
+  /* ---------------- 座位 Excel 导出 / 导入 ---------------- */
+  function seatSheetAoa() {
+    syncSeatmap();
+    var L = lang();
+    var head = L === 'en'
+      ? ['Seat no.', 'Name', 'Student ID', 'Row', 'Col', 'Seat']
+      : ['座位号', '姓名', '学号', '行', '列', '座位'];
+    var rows = [head];
+    var C = Math.max(1, Number(state.seatmap.cols) || 1);
+    var list = state.participants.slice().sort(function (a, b) {
+      var na = seatNoOf(a.uid), nb = seatNoOf(b.uid);
+      if (na && nb && na !== nb) return na - nb;
+      if (na && !nb) return -1;
+      if (!na && nb) return 1;
+      return seatIndexOfUid(a.uid) - seatIndexOfUid(b.uid);
+    });
+    list.forEach(function (p) {
+      var idx = seatIndexOfUid(p.uid);
+      var no = seatNoOf(p.uid);
+      rows.push([
+        no || '',
+        p.name,
+        p.id || '',
+        idx >= 0 ? Math.floor(idx / C) + 1 : '',
+        idx >= 0 ? (idx % C) + 1 : '',
+        idx >= 0 ? seatLabel(idx) : ''
+      ]);
+    });
+    return rows;
+  }
+
+  async function exportSeatXlsx() {
+    var L = lang();
+    if (!state.participants.length) { toast(L === 'en' ? 'Roster is empty' : '名单为空', 'err'); return; }
+    if (!window.XLSX) { try { await loadSheetJS(); } catch (e) { } }
+    var aoa = seatSheetAoa();
+    if (!window.XLSX) {
+      var lib = function (v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; };
+      download('座位表_' + stamp() + '.csv', '\ufeff' + aoa.map(function (r) { return r.map(lib).join(','); }).join('\r\n'), 'text/csv;charset=utf-8');
+      toast(L === 'en' ? 'Seat CSV exported (Excel engine unavailable)' : 'Excel 引擎不可用，已导出座位 CSV', 'ok');
+      return;
+    }
+    try {
+      var wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), L === 'en' ? 'Seats' : '座位表');
+      var out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+      download('座位表_' + stamp() + '.xlsx', new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+      toast(L === 'en' ? 'Seat sheet exported' : '座位表已导出（Excel）', 'ok');
+    } catch (e) {
+      toast(L === 'en' ? 'Seat export failed' : '座位表导出失败', 'err');
+    }
+  }
+
+  function importSeatExcel() {
+    var inp = $('#seatImportFile');
+    if (inp) { inp.value = ''; inp.click(); }
+  }
+
+  async function handleSeatImportFile(file) {
+    var L = lang();
+    if (!file) return;
+    var N = state.participants.length;
+    if (!N) { toast(L === 'en' ? 'Roster is empty' : '名单为空，无法导入座位', 'err'); return; }
+    if (!window.XLSX) { try { await loadSheetJS(); } catch (e) { } }
+    if (!window.XLSX) { toast(L === 'en' ? 'Excel engine unavailable' : 'Excel 解析库不可用', 'err'); return; }
+    var wb;
+    try {
+      var buf = await file.arrayBuffer();
+      wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
+    } catch (e) {
+      toast(L === 'en' ? 'Cannot read this Excel file' : '无法读取该 Excel 文件', 'err'); return;
+    }
+    var sheetName = wb.SheetNames.indexOf('座位表') >= 0 ? '座位表' : (wb.SheetNames.indexOf('Seats') >= 0 ? 'Seats' : wb.SheetNames[0]);
+    var aoa = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, blankrows: false, defval: '' });
+    if (!aoa || !aoa.length) { toast(L === 'en' ? 'Empty sheet' : '工作表为空', 'err'); return; }
+    var norm = function (v) { return String(v == null ? '' : v).trim().toLowerCase().replace(/\s+/g, ''); };
+    var heads = {
+      no: ['座位号', '序号', '编号', '座号', 'seatno', 'seatno.', 'no', 'no.', 'number', 'seatnumber'],
+      name: ['姓名', '名字', '学生', 'name', 'student'],
+      id: ['学号', 'id', 'studentid', 'studentno'],
+      row: ['行', 'row'],
+      col: ['列', 'col', 'column'],
+      seat: ['座位', '座位标签', 'seat']
+    };
+    var findCol = function (row, keys) {
+      for (var i = 0; i < row.length; i++) if (keys.indexOf(norm(row[i])) >= 0) return i;
+      return -1;
+    };
+    var hi = -1, cols = null;
+    for (var r = 0; r < Math.min(10, aoa.length); r++) {
+      var cName = findCol(aoa[r], heads.name);
+      if (cName >= 0) {
+        cols = {
+          no: findCol(aoa[r], heads.no), name: cName, id: findCol(aoa[r], heads.id),
+          row: findCol(aoa[r], heads.row), col: findCol(aoa[r], heads.col), seat: findCol(aoa[r], heads.seat)
+        };
+        hi = r; break;
+      }
+    }
+    if (hi < 0) { toast(L === 'en' ? 'No “Name” column found' : '未找到“姓名”列，请使用导出的座位表模板', 'err'); return; }
+    if (cols.no < 0) { toast(L === 'en' ? 'No “Seat no.” column found' : '未找到“座位号”列', 'err'); return; }
+    var byId = {}, byName = {};
+    state.participants.forEach(function (p) {
+      if (p.id) byId[String(p.id).toLowerCase()] = p;
+      (byName[p.name] = byName[p.name] || []).push(p);
+    });
+    var errs = [], used = {}, usedNo = {}, list = [];
+    for (var i2 = hi + 1; i2 < aoa.length; i2++) {
+      var row = aoa[i2] || [];
+      var name = String(row[cols.name] == null ? '' : row[cols.name]).trim();
+      if (!name && !String(row[cols.no] == null ? '' : row[cols.no]).trim()) continue;
+      var line = i2 + 1;
+      if (!name) { errs.push((L === 'en' ? 'Row ' : '第 ') + line + (L === 'en' ? ': missing name' : ' 行：姓名为空')); continue; }
+      var sid = cols.id >= 0 ? String(row[cols.id] == null ? '' : row[cols.id]).trim() : '';
+      var p = sid ? byId[sid.toLowerCase()] : (byName[name] && byName[name].length === 1 ? byName[name][0] : null);
+      if (!p && !sid && byName[name]) {
+        p = byName[name].filter(function (x) { return !used[x.uid]; })[0] || null;
+      }
+      if (!p) { errs.push((L === 'en' ? 'Row ' : '第 ') + line + (L === 'en' ? ': name/ID not in roster' : ' 行：姓名/学号不在名单中') + '（' + name + '）'); continue; }
+      if (sid && name && p.name !== name) {
+        errs.push((L === 'en' ? 'Row ' : '第 ') + line + (L === 'en' ? ': name does not match the student ID' : ' 行：姓名与学号不匹配') + '（' + name + ' / ' + sid + '）');
+        continue;
+      }
+      if (used[p.uid]) { errs.push((L === 'en' ? 'Row ' : '第 ') + line + (L === 'en' ? ': duplicate student' : ' 行：学生重复') + '（' + name + '）'); continue; }
+      used[p.uid] = 1;
+      var noRaw = String(row[cols.no] == null ? '' : row[cols.no]).trim();
+      var no = Math.round(Number(noRaw));
+      if (!(no >= 1 && no <= 9999) || !noRaw || isNaN(Number(noRaw))) { errs.push((L === 'en' ? 'Row ' : '第 ') + line + (L === 'en' ? ': invalid seat number' : ' 行：座位号无效')); continue; }
+      if (usedNo[no]) { errs.push((L === 'en' ? 'Row ' : '第 ') + line + (L === 'en' ? ': duplicate seat number ' : ' 行：座位号重复 ') + no); continue; }
+      usedNo[no] = 1;
+      var rv = cols.row >= 0 ? String(row[cols.row] == null ? '' : row[cols.row]).trim() : '';
+      var cv = cols.col >= 0 ? String(row[cols.col] == null ? '' : row[cols.col]).trim() : '';
+      list.push({ p: p, no: no, rowRaw: rv, colRaw: cv, line: line });
+    }
+    if (errs.length) {
+      toast((L === 'en' ? 'Seat import failed: ' : '座位导入失败：') + errs.slice(0, 2).join(L === 'en' ? '; ' : '；'), 'err');
+      try { console.warn('[seat import]', errs); } catch (e) { }
+      return;
+    }
+    if (list.length !== N) {
+      toast(L === 'en' ? ('Row count mismatch: expected ' + N + ', got ' + list.length) : ('人数不一致：名单 ' + N + ' 人，表格 ' + list.length + ' 人'), 'err');
+      return;
+    }
+    var missing = state.participants.filter(function (p) { return !used[p.uid]; });
+    if (missing.length) {
+      toast(L === 'en' ? 'Some roster members are missing from the sheet' : '表格中缺少部分名单成员：' + missing.slice(0, 3).map(function (p) { return p.name; }).join('、'), 'err');
+      return;
+    }
+    var havePos = list.filter(function (x) { return x.rowRaw !== '' || x.colRaw !== ''; }).length;
+    var rows, cols, grid, numbers = {};
+    if (havePos && havePos !== list.length) {
+      toast(L === 'en' ? 'Some rows have row/col and some do not' : '部分行有“行/列”、部分没有，请补全后再导入', 'err');
+      return;
+    }
+    if (havePos) {
+      var maxR = 0, maxC = 0, cells = {}, posErr = '';
+      list.forEach(function (x) {
+        var rr = Math.round(Number(x.rowRaw)), cc = Math.round(Number(x.colRaw));
+        if (!(rr >= 1 && cc >= 1) || rr > N || cc > N) { posErr = (L === 'en' ? 'Invalid row/col at line ' : '行/列无效：第 ') + x.line + (L === 'en' ? '' : ' 行'); return; }
+        var key = rr + ',' + cc;
+        if (cells[key]) { posErr = (L === 'en' ? 'Duplicate seat position at line ' : '座位位置重复：第 ') + x.line + (L === 'en' ? '' : ' 行'); return; }
+        cells[key] = x; maxR = Math.max(maxR, rr); maxC = Math.max(maxC, cc);
+      });
+      if (posErr) { toast(posErr, 'err'); return; }
+      rows = maxR; cols = maxC;
+      if (rows * cols < N) { toast(L === 'en' ? 'Grid too small for all seats' : '表格中的行/列容不下全部座位', 'err'); return; }
+      grid = new Array(rows * cols).fill(null);
+      list.forEach(function (x) {
+        var idx = (Math.round(Number(x.rowRaw)) - 1) * cols + (Math.round(Number(x.colRaw)) - 1);
+        grid[idx] = x.p.uid;
+        numbers[x.p.uid] = x.no;
+      });
+    } else {
+      var d = nearSquare(N);
+      rows = d.rows; cols = d.cols;
+      grid = new Array(rows * cols).fill(null);
+      list.slice().sort(function (a, b) { return a.no - b.no; }).forEach(function (x, i) {
+        grid[i] = x.p.uid;
+        numbers[x.p.uid] = x.no;
+      });
+    }
+    pushUndo();
+    state.seatmap.rows = rows;
+    state.seatmap.cols = cols;
+    state.seatmap.grid = grid;
+    state.seatmap.numbers = numbers;
+    state.seatmap.auto = false;
+    syncSeatmap();
+    save(); renderSeatMap(); renderLastCard();
+    toast(L === 'en' ? ('Seat sheet imported: ' + N + ' seats, layout ' + rows + '×' + cols) : ('座位表已导入：' + N + ' 个座位，布局 ' + rows + '×' + cols), 'ok');
   }
 
   function renderStats() {
@@ -4333,6 +5047,7 @@
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(roster), L === 'en' ? 'Roster' : '名单');
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(hist), L === 'en' ? 'History' : '历史');
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(stats), L === 'en' ? 'Stats' : '统计');
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(seatSheetAoa()), L === 'en' ? 'Seats' : '座位表');
       var out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
       download('点名数据_' + stamp() + '.xlsx', new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
       toast(L === 'en' ? 'Excel exported' : 'Excel 已导出', 'ok');
@@ -4537,8 +5252,8 @@
   /* ---------------- 首次引导 ---------------- */
   var GUIDE = [
     {
-      zh: '在左侧 <b>参与者名单</b> 中手动添加，或点击底部 <b>导入</b>（快捷键 <code>E</code>）批量粘贴名单。支持 <code>姓名</code>、<code>姓名,学号</code>、<code>姓名,学号,分组</code> 三种写法。',
-      en: 'Add participants on the left, or hit <b>Import</b> (shortcut <code>E</code>) to paste a roster. Formats: <code>Name</code>, <code>Name,StudentID</code>, <code>Name,StudentID,Group</code>.'
+      zh: '在左侧 <b>参与者名单</b> 中手动添加，或打开右上角 <b>⚙ 设置 → 快捷入口 → 导入</b>（快捷键 <code>E</code>）批量粘贴名单。支持 <code>姓名</code>、<code>姓名,学号</code>、<code>姓名,学号,分组</code> 三种写法。',
+      en: 'Add participants on the left, or open <b>⚙ Settings → Shortcuts → Import</b> (shortcut <code>E</code>) to paste a roster. Formats: <code>Name</code>, <code>Name,StudentID</code>, <code>Name,StudentID,Group</code>.'
     },
     {
       zh: '点 <b>单抽</b> 或 <b>十连</b> 开始抽卡（<code>空格</code> 单抽、<code>Shift+空格</code> 十连）。不重复模式下抽中者自动移出候选池，也可以随时手动「放回」。',
@@ -4566,8 +5281,8 @@
     var ok = await ask({
       title: lang() === 'en' ? 'Reset system' : '重置系统',
       msg: (lang() === 'en'
-        ? 'This clears <b>the whole roster</b>, <b>all draw history</b> and <b>point records</b>. Your settings, odds, pity and sound preferences are kept. You can undo afterwards.'
-        : '将清空 <b>全部名单</b>、<b>抽取历史</b> 与 <b>积分记录</b>。设置、概率、保底与音效偏好会保留。操作后仍可撤销。') +
+        ? 'This clears <b>the whole roster</b>, <b>all draw history</b>, <b>point records</b> and <b>seat assignments</b>. Your settings, odds, pity and sound preferences are kept. You can undo afterwards.'
+        : '将清空 <b>全部名单</b>、<b>抽取历史</b>、<b>积分记录</b> 与 <b>座位安排</b>。设置、概率、保底与音效偏好会保留。操作后仍可撤销。') +
         '<br><span style="opacity:.7;font-size:12px">' + (lang() === 'en' ? 'Roster: ' : '当前名单：') +
         state.participants.length + (lang() === 'en' ? ' · history: ' : ' 人 · 历史 ') + state.history.length + (lang() === 'en' ? ' draws' : ' 次') + '</span>',
       ok: lang() === 'en' ? 'Reset' : '确认重置',
@@ -4581,6 +5296,7 @@
     state.last = null;
     state.drawIndex = 0;
     state.seq = 1;
+    state.seatmap = freshSeatmap();
     state.settings.group = 'all';
     state.settings.scope = 'all';
     state.settings.search = '';
@@ -4690,6 +5406,7 @@
       }
       pushUndo();
       state.participants.push({ uid: nextUid(), name: name.slice(0, 20), id: id.slice(0, 30), group: group.slice(0, 12), drawn: false, drawnAt: 0, order: nextOrder() });
+      syncSeatmap();
       save(); renderAll();
       Sfx.play('click', 0.5);
       nameEl.value = ''; idEl.value = ''; gEl.value = '';
@@ -4740,6 +5457,8 @@
           if (!okDel) return;
           pushUndo();
           state.participants = state.participants.filter(function (x) { return x.uid !== uid; });
+          var ds = {}; ds[uid] = 1; unseatUids(ds);
+          syncSeatmap();
           delete selected[uid];
           save(); renderAll();
           logAction('delete', (lang() === 'en' ? 'Deleted ' : '删除 ') + p.name);
@@ -4879,6 +5598,8 @@
         var set = {};
         uids.forEach(function (u) { set[u] = 1; });
         state.participants = state.participants.filter(function (p) { return !set[p.uid]; });
+        unseatUids(set);
+        syncSeatmap();
         selected = {};
         save(); renderAll();
         toast(lang() === 'en' ? 'Deleted' : '已删除', 'ok');
@@ -5017,6 +5738,24 @@
     var db = $('#drawBtn'), dt = $('#drawTenBtn');
     if (db) db.addEventListener('click', function () { Sfx.play('click', 0.6); drawSingle(); });
     if (dt) dt.addEventListener('click', function () { Sfx.play('click', 0.6); drawTen(); });
+    var idb = $('#drawIdBtn');
+    if (idb) idb.addEventListener('click', function () { Sfx.play('click', 0.6); drawSingle('id'); });
+    var osb = $('#openSeatBtn');
+    if (osb) osb.addEventListener('click', function () { openModal($('#seatModal')); });
+    var dmRange = $('#drawModeRange');
+    if (dmRange) dmRange.addEventListener('input', function () {
+      var v = Math.max(0, Math.min(2, Math.round(Number(dmRange.value) || 0)));
+      state.settings.drawMode = DRAW_MODES[v];
+      save(); syncDrawModeUI(); renderStageNote(); Sfx.play('tick', 0.4);
+    });
+    $$('.draw-mode-labels span').forEach(function (el) {
+      el.addEventListener('click', function () {
+        var idx = DRAW_MODES.indexOf(el.dataset.mode);
+        if (idx < 0) return;
+        state.settings.drawMode = DRAW_MODES[idx];
+        save(); syncDrawModeUI(); renderStageNote(); Sfx.play('click', 0.4);
+      });
+    });
 
     // 主题 / 音效 / 设置
     var tb = $('#themeToggle');
@@ -5033,25 +5772,83 @@
     });
     var setBtn = $('#settingsBtn');
     if (setBtn) setBtn.addEventListener('click', function () { openModal($('#settingsModal')); });
+    var expBtn = $('#exportBtn');
+    if (expBtn) expBtn.addEventListener('click', function () { Sfx.play('click', 0.5); openModal($('#exportModal')); });
 
-    // dock
-    var dock = $('#dock');
-    if (dock) dock.addEventListener('click', function (e) {
-      var b = e.target.closest ? e.target.closest('[data-action]') : null;
-      if (!b) return;
-      var a = b.dataset.action;
-      Sfx.play('click', 0.5);
+    // 统一动作分发：底部 dock 只剩撤销/重做，其余入口在设置面板「快捷入口」
+    function runAction(a) {
       if (a === 'import') openModal($('#importModal'));
       else if (a === 'history') openModal($('#historyModal'));
       else if (a === 'stats') openModal($('#statsModal'));
       else if (a === 'points') openModal($('#pointsModal'));
+      else if (a === 'seats') openModal($('#seatModal'));
       else if (a === 'export') openModal($('#exportModal'));
       else if (a === 'settings') openModal($('#settingsModal'));
       else if (a === 'pk') { openModal($('#pkModal')); renderPk(); }
       else if (a === 'undo') undo();
       else if (a === 'redo') redo();
       else if (a === 'reset') resetAll();
+    }
+    var dock = $('#dock');
+    if (dock) dock.addEventListener('click', function (e) {
+      var b = e.target.closest ? e.target.closest('[data-action]') : null;
+      if (!b) return;
+      Sfx.play('click', 0.5);
+      runAction(b.dataset.action);
     });
+
+    // 设置面板里的快捷入口：先收起设置，再打开目标面板（避免弹窗堆叠）
+    var quickGrid = $('#quickGrid');
+    if (quickGrid) quickGrid.addEventListener('click', function (e) {
+      var b = e.target.closest ? e.target.closest('[data-action]') : null;
+      if (!b) return;
+      Sfx.play('click', 0.5);
+      var a = b.dataset.action;
+      closeEl($('#settingsModal'));
+      setTimeout(function () { runAction(a); }, 120);
+    });
+
+    // 设置面板内的危险操作：重置
+    var resetBtn2 = $('#resetBtn2');
+    if (resetBtn2) resetBtn2.addEventListener('click', function () {
+      Sfx.play('click', 0.5);
+      closeEl($('#settingsModal'));
+      setTimeout(function () { resetAll(); }, 120);
+    });
+
+    // 关于：作者 GitHub 主页为占位，填好地址后自动变成可点链接
+    var profLink = $('#aboutProfile');
+    if (profLink) {
+      var todoProfile = function (e) {
+        if (e) e.preventDefault();
+        toast(lang() === 'en'
+          ? 'Author GitHub profile link is not set yet — add it to ABOUT.profile in app.js'
+          : '作者 GitHub 主页地址还没填，可在 app.js 的 ABOUT.profile 里补上', 'err');
+      };
+      if (ABOUT.profile) {
+        profLink.href = ABOUT.profile;
+        profLink.target = '_blank';
+        profLink.rel = 'noopener noreferrer';
+        profLink.classList.remove('is-todo');
+        profLink.removeAttribute('aria-disabled');
+        profLink.removeAttribute('role');
+        profLink.removeAttribute('tabindex');
+        profLink.removeAttribute('data-todo');
+        var pu = $('#aboutProfileUrl');
+        if (pu) {
+          pu.textContent = ABOUT.profile.replace(/^https?:\/\//, '').replace(/\/$/, '');
+          pu.removeAttribute('data-zh');
+          pu.removeAttribute('data-en');
+        }
+      } else {
+        profLink.addEventListener('click', todoProfile);
+        profLink.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter' || e.key === ' ') todoProfile(e);
+        });
+      }
+    }
+    var verEl = $('#aboutVersion');
+    if (verEl) verEl.textContent = String(state.version || 4);
 
     // 关闭按钮 / 遮罩点击
     $$('[data-close]').forEach(function (b) {
@@ -5222,6 +6019,7 @@
         uidMap[p2.uid] = p2;
         added++;
       });
+      syncSeatmap();
       save(); renderAll();
       logAction('import', '按学号更新 ' + updated + ' 人，新增 ' + added + ' 人');
       toast(lang() === 'en' ? ('Updated ' + updated + ', added ' + added) : ('已更新 ' + updated + ' 人，新增 ' + added + ' 人'), 'ok');
@@ -5236,8 +6034,8 @@
         var ok = await ask({
           title: lang() === 'en' ? 'Replace roster' : '替换名单',
           msg: (lang() === 'en'
-            ? ('The current <b>' + state.participants.length + '</b> participants and their drawn marks will be replaced by <b>' + r.rows.length + '</b> new entries. History is kept.')
-            : ('当前 <b>' + state.participants.length + '</b> 人及其「已抽中」标记将被新的 <b>' + r.rows.length + '</b> 条名单替换。抽取历史保留。')),
+            ? ('The current <b>' + state.participants.length + '</b> participants, their drawn marks and seat assignments will be replaced by <b>' + r.rows.length + '</b> new entries. History is kept.')
+            : ('当前 <b>' + state.participants.length + '</b> 人及其「已抽中」标记与座位安排将被新的 <b>' + r.rows.length + '</b> 条名单替换。抽取历史保留。')),
           ok: lang() === 'en' ? 'Replace' : '替换', danger: true
         });
         if (!ok) return;
@@ -5245,6 +6043,7 @@
       pushUndo();
       state.participants = [];
       state.seq = 1;
+      state.seatmap = freshSeatmap();
       selected = {};
       addParticipants(r.rows);
       save(); renderAll();
@@ -5965,6 +6764,91 @@
       toast(L === 'en' ? 'Error log cleared' : '错误日志已清空', 'ok');
     });
 
+    // 座位表：模式 / 2D / 拖拽 / 自动排座 / 抽座位
+    var seatBody = $('#seatBody');
+    if (seatBody) {
+      seatBody.addEventListener('click', function (e) {
+        if (!e.target.closest) return;
+        var mb = e.target.closest('[data-seatmode]');
+        if (mb) {
+          seatEdit = mb.dataset.seatmode === 'edit';
+          seatSel = null;
+          renderSeatMap();
+          Sfx.play('click', 0.45);
+          return;
+        }
+        if (e.target.closest('#seatFlatBtn')) {
+          state.settings.seatFlat = !isSeatFlat();
+          save(); renderSeatMap();
+          Sfx.play('click', 0.45);
+          return;
+        }
+        if (e.target.closest('#seatApplyLayout')) {
+          var ri = $('#seatRowsInput'), ci = $('#seatColsInput');
+          applySeatLayout(ri ? ri.value : 0, ci ? ci.value : 0);
+          return;
+        }
+        if (e.target.closest('#seatAutoLayout')) { autoLayoutSeats(); return; }
+        if (e.target.closest('#seatAutoNumber')) { autoNumberSeats(); return; }
+        if (e.target.closest('#seatImportBtn')) { importSeatExcel(); return; }
+        if (e.target.closest('#seatExportBtn')) { exportSeatXlsx(); return; }
+        var seat = e.target.closest('.seat');
+        if (seat && seatEdit) { seatClick(Number(seat.dataset.seat)); return; }
+        var slot = e.target.closest('.seat-slot');
+        if (slot && seatEdit && seatSel != null && state.seatmap.grid[seatSel]) {
+          moveSeatTo(state.seatmap.grid[seatSel], Number(slot.dataset.cell));
+        }
+      });
+      seatBody.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        var s = e.target.closest ? e.target.closest('.seat') : null;
+        if (s && seatEdit) { e.preventDefault(); seatClick(Number(s.dataset.seat)); }
+      });
+      seatBody.addEventListener('dragstart', function (e) {
+        if (!seatEdit) return;
+        var t = e.target.closest ? e.target.closest('[data-uid]') : null;
+        if (!t) return;
+        try { e.dataTransfer.setData('text/plain', JSON.stringify({ uid: t.dataset.uid })); e.dataTransfer.effectAllowed = 'move'; } catch (err) { }
+      });
+      seatBody.addEventListener('dragover', function (e) {
+        var st = e.target.closest ? e.target.closest('.seat-slot') : null;
+        if (!st || !seatEdit) return;
+        e.preventDefault();
+        st.classList.add('over');
+      });
+      seatBody.addEventListener('dragleave', function (e) {
+        var st = e.target.closest ? e.target.closest('.seat-slot') : null;
+        if (st) st.classList.remove('over');
+      });
+      seatBody.addEventListener('drop', function (e) {
+        var st = e.target.closest ? e.target.closest('.seat-slot') : null;
+        if (!st || !seatEdit) return;
+        e.preventDefault();
+        st.classList.remove('over');
+        var raw = '';
+        try { raw = e.dataTransfer.getData('text/plain'); } catch (err) { }
+        var d = null;
+        try { d = JSON.parse(raw); } catch (err) { }
+        if (d && d.uid) moveSeatTo(d.uid, Number(st.dataset.cell));
+      });
+    }
+    var seatFile = $('#seatImportFile');
+    if (seatFile) seatFile.addEventListener('change', function () {
+      var f = seatFile.files && seatFile.files[0];
+      if (f) handleSeatImportFile(f);
+      seatFile.value = '';
+    });
+    var seatExportBtn = $('#seatExportBtn');
+    if (seatExportBtn) seatExportBtn.addEventListener('click', function () { exportSeatXlsx(); });
+    var seatDrawBtn = $('#seatDrawBtn');
+    if (seatDrawBtn) seatDrawBtn.addEventListener('click', function () {
+      if (seatEdit) { toast(lang() === 'en' ? 'Switch to draw mode first' : '请先切回抽奖模式', 'err'); return; }
+      if (!poolSeats().length) { toast(lang() === 'en' ? 'No seats yet' : '还没有座位', 'err'); return; }
+      state.settings.drawMode = 'seat';
+      save(); syncDrawModeUI();
+      drawSingle('seat');
+    });
+
     // 引导
     var gs = $('#guideStart');
     if (gs) gs.addEventListener('click', function () {
@@ -6283,6 +7167,8 @@
         if (act === 'del') {
           pushUndo();
           state.participants = state.participants.filter(function (x) { return x.uid !== p.uid; });
+          var ds2 = {}; ds2[p.uid] = 1; unseatUids(ds2);
+          syncSeatmap();
           delete selected[p.uid];
           save(); renderAll();
           toast(L === 'en' ? 'Deleted' : '已删除', 'ok');
@@ -6363,6 +7249,12 @@
     lowEnd: LOW_END,
     flushSave: flushSave,
     stateBytes: stateBytes,
+    seatSheetAoa: seatSheetAoa,
+    handleSeatImportFile: handleSeatImportFile,
+    syncSeatmap: syncSeatmap,
+    autoNumberSeats: autoNumberSeats,
+    applySeatLayout: applySeatLayout,
+    seatStats: seatStats,
     recountPoints: recountPoints,
     aggregate: function () { return __core__.aggregatePoints(state.pointLog || []); }
   });
